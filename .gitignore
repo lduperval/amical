@@ -58,3 +58,6 @@ AGENTS.md
 
 # Temp files
 /tmp
+
+# Java compile file
+*.class
