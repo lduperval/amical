@@ -207,6 +207,9 @@ const testAppPath = process.cwd();
 
 // Mock app object
 const mockApp = {
+  commandLine: {
+    appendSwitch: vi.fn(),
+  },
   getPath: vi.fn((name: string) => {
     const paths: Record<string, string> = {
       userData: testUserDataPath,

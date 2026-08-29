@@ -26,8 +26,9 @@ import {
   type AppSettingsData,
 } from "./schema";
 import { dictationLanguageForLocale } from "../constants/languages";
-import { isMacOS } from "../utils/platform";
+import { isLinux, isMacOS } from "../utils/platform";
 import { MAC_KEYCODES, WINDOWS_KEYCODES } from "../utils/keycodes";
+import { LINUX_DEFAULT_SHORTCUTS } from "../utils/linux-default-shortcuts";
 import {
   CURRENT_SETTINGS_VERSION,
   migrateSettings,
@@ -48,6 +49,16 @@ const getDefaultShortcuts = () => {
       ],
       newNote: [[MAC_KEYCODES.CMD, MAC_KEYCODES.CTRL, MAC_KEYCODES.N]],
       draftMode: [[MAC_KEYCODES.FN, MAC_KEYCODES.CTRL]],
+    };
+  }
+
+  if (isLinux()) {
+    return {
+      pushToTalk: [[...LINUX_DEFAULT_SHORTCUTS.pushToTalk]],
+      toggleRecording: [[...LINUX_DEFAULT_SHORTCUTS.toggleRecording]],
+      pasteLastTranscript: [[...LINUX_DEFAULT_SHORTCUTS.pasteLastTranscript]],
+      newNote: [[...LINUX_DEFAULT_SHORTCUTS.newNote]],
+      draftMode: [[...LINUX_DEFAULT_SHORTCUTS.draftMode]],
     };
   }
 

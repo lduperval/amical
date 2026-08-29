@@ -32,6 +32,7 @@ describe("WindowManager lifecycle events", () => {
   const buildManager = async () => {
     const settingsService = {
       getUISettings: vi.fn(async () => ({ theme: "system", locale: "en" })),
+      getPreferences: vi.fn(async () => ({ showWidgetWhileInactive: true })),
       updateSettings: vi.fn(async () => undefined),
     } as unknown as SettingsService;
 
@@ -92,6 +93,24 @@ describe("WindowManager lifecycle events", () => {
     await expectCloseThenRecreate(created, closing, () =>
       manager.createWidgetWindow(),
     );
+  });
+
+  it("shows the idle widget after load when the persisted preference enables it", async () => {
+    const { manager, created } = await buildManager();
+
+    await manager.createWidgetWindow();
+    const widget = created[0];
+    expect(widget.isVisible()).toBe(false);
+
+    const didFinishLoad = (
+      widget.webContents.once as ReturnType<typeof vi.fn>
+    ).mock.calls.find(([event]) => event === "did-finish-load")?.[1] as
+      | (() => void)
+      | undefined;
+    expect(didFinishLoad).toBeTypeOf("function");
+    didFinishLoad?.();
+
+    await vi.waitFor(() => expect(widget.isVisible()).toBe(true));
   });
 
   it("onboarding window: created → closing (pre-destruction) → recreated", async () => {
