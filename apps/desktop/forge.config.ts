@@ -611,6 +611,63 @@ const config: ForgeConfig = {
           }
         }
         console.log("✓ VC++ runtime DLLs bundled successfully");
+      } else if (platform === "linux") {
+        const getOnnxRuntimeDllDirs = (binRoot: string): string[] => {
+          if (!existsSync(binRoot)) return [];
+          return readdirSync(binRoot)
+            .map((napiVersionDir) => join(binRoot, napiVersionDir, "linux", arch))
+            .filter((candidate) => {
+              try {
+                return statSync(candidate).isDirectory();
+              } catch {
+                return false;
+              }
+            });
+        };
+
+        for (const outputPath of outputPaths) {
+          const onnxBinRoots = [
+            join(
+              outputPath,
+              "resources",
+              "app.asar.unpacked",
+              "node_modules",
+              "onnxruntime-node",
+              "bin",
+            ),
+            join(
+              outputPath,
+              "resources",
+              "app",
+              "node_modules",
+              "onnxruntime-node",
+              "bin",
+            ),
+          ];
+
+          for (const binRoot of onnxBinRoots) {
+            const dirs = getOnnxRuntimeDllDirs(binRoot);
+            for (const dir of dirs) {
+              if (existsSync(dir)) {
+                console.log(`[postPackage] Inspecting ONNX Runtime directory for Linux: ${dir}`);
+                const files = readdirSync(dir);
+                for (const file of files) {
+                  // Copy .so files to the root of the output path (next to the executable)
+                  if (file.endsWith(".so") || file.includes(".so.")) {
+                    const src = join(dir, file);
+                    const dest = join(outputPath, file);
+                    if (src !== dest) {
+                      copyFileSync(src, dest);
+                      console.log(
+                        `  Copied ${file} to app root for Linux RPATH resolution`,
+                      );
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
   },
@@ -624,7 +681,13 @@ const config: ForgeConfig = {
     icon: "./assets/logo", // Path to your icon file
     appBundleId: "ai.amical.desktop", // Proper bundle ID
     extraResource: [
-      `${process.platform === "win32" ? "../../packages/native-helpers/windows-helper/bin" : "../../packages/native-helpers/swift-helper/bin"}`,
+      `${
+        process.platform === "win32"
+          ? "../../packages/native-helpers/windows-helper/bin"
+          : process.platform === "linux"
+            ? "../../packages/native-helpers/linux-helper/bin"
+            : "../../packages/native-helpers/swift-helper/bin"
+      }`,
       "./src/db/migrations",
       "./models",
       "./assets",
@@ -820,8 +883,13 @@ const config: ForgeConfig = {
       },
       ["darwin"],
     ),
-    new MakerRpm({}),
-    new MakerDeb({}),
+    new MakerRpm({ options: { bin: "Amical" } }),
+    new MakerDeb({
+      options: {
+        bin: "Amical",
+        mimeType: ["x-scheme-handler/amical"],
+      },
+    }),
   ],
   plugins: [
     new VitePlugin({

@@ -339,4 +339,4 @@ export async function syncLocalWhisperModels(
 }
 
 // Re-export types for use in other modules
-export { Model, NewModel } from "./schema";
+export type { Model, NewModel } from "./schema";
