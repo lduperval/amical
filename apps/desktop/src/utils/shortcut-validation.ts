@@ -124,7 +124,7 @@ export function checkReservedShortcut(
   platform: NodeJS.Platform,
 ): ValidationResult {
   const reserved =
-    platform === "darwin"
+    platform !== "win32"
       ? RESERVED_SHORTCUTS_MACOS
       : RESERVED_SHORTCUTS_WINDOWS;
 
@@ -155,9 +155,9 @@ export function checkAlphanumericOnly(
   platform: NodeJS.Platform,
 ): ValidationResult {
   const modifierSet =
-    platform === "darwin" ? MAC_MODIFIER_KEYCODES : WINDOWS_MODIFIER_KEYCODES;
+    platform !== "win32" ? MAC_MODIFIER_KEYCODES : WINDOWS_MODIFIER_KEYCODES;
   const specialSet =
-    platform === "darwin" ? MAC_SPECIAL_KEYCODES : WINDOWS_SPECIAL_KEYCODES;
+    platform !== "win32" ? MAC_SPECIAL_KEYCODES : WINDOWS_SPECIAL_KEYCODES;
 
   // Check if any key is a modifier
   const hasModifier = keys.some((key) => modifierSet.has(key));
@@ -187,7 +187,7 @@ export function checkDuplicateModifierPairs(
   platform: NodeJS.Platform,
 ): ValidationResult {
   const modifierPairs =
-    platform === "darwin" ? MAC_MODIFIER_PAIRS : WINDOWS_MODIFIER_PAIRS;
+    platform !== "win32" ? MAC_MODIFIER_PAIRS : WINDOWS_MODIFIER_PAIRS;
 
   for (const [left, right] of modifierPairs) {
     if (keys.includes(left) && keys.includes(right)) {
@@ -202,6 +202,31 @@ export function checkDuplicateModifierPairs(
     }
   }
   return { valid: true };
+}
+
+/**
+ * XDG GlobalShortcuts accelerators contain zero or more modifiers followed by
+ * exactly one trigger key. In particular, a modifier-only chord such as
+ * Ctrl+Super+Alt cannot be registered even when the desktop provides the
+ * portal (GNOME 48+).
+ */
+export function checkLinuxPortalCompatibility(
+  keys: number[],
+  platform: NodeJS.Platform,
+): ValidationResult {
+  if (platform !== "linux") return { valid: true };
+
+  const triggerKeys = keys.filter(
+    (keycode) => !MAC_MODIFIER_KEYCODES.has(keycode),
+  );
+  if (triggerKeys.length === 1) return { valid: true };
+
+  return {
+    valid: false,
+    error: {
+      key: "settings.shortcuts.validation.linuxPortalTriggerRequired",
+    },
+  };
 }
 
 /**
@@ -280,6 +305,7 @@ export function validateShortcutBindings(
       checkReservedShortcut(candidateShortcut, platform),
       checkAlphanumericOnly(candidateShortcut, platform),
       checkDuplicateModifierPairs(candidateShortcut, platform),
+      checkLinuxPortalCompatibility(candidateShortcut, platform),
     ];
     const error = checks.find((result) => !result.valid);
     if (error) return error;

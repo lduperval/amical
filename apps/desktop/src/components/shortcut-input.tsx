@@ -4,7 +4,11 @@ import { Pencil, Trash2, X } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { api } from "@/trpc/react";
 import { toast } from "sonner";
-import { getKeyFromKeycode, keycodeToDisplay, getKeycodeFromKeyName } from "@/utils/keycode-map";
+import {
+  getKeyFromKeycode,
+  keycodeToDisplay,
+  getKeycodeFromKeyName,
+} from "@/utils/keycode-map";
 import {
   handleActiveKeysEmission,
   initialShortcutRecordingState,
@@ -52,42 +56,78 @@ function mapDomCodeToAmicalKey(code: string): string | undefined {
   if (code.startsWith("Key")) return code.slice(3);
   if (code.startsWith("Digit")) return code.slice(5);
   if (code.startsWith("F") && code.length <= 3) return code;
-  
+
   const map: Record<string, string> = {
-    "Space": "Space",
-    "Enter": "Enter",
-    "NumpadEnter": "Enter",
-    "Escape": "Escape",
-    "Backspace": "Delete", 
-    "Delete": "ForwardDelete",
-    "Tab": "Tab",
-    "ControlLeft": "Ctrl",
-    "ControlRight": "RCtrl",
-    "AltLeft": "Alt",
-    "AltRight": "RAlt",
-    "ShiftLeft": "Shift",
-    "ShiftRight": "RShift",
-    "MetaLeft": "Cmd",
-    "MetaRight": "RCmd",
-    "OSLeft": "Cmd",
-    "OSRight": "RCmd",
-    "Minus": "-",
-    "Equal": "=",
-    "BracketLeft": "[",
-    "BracketRight": "]",
-    "Backslash": "\\",
-    "Semicolon": ";",
-    "Quote": "'",
-    "Comma": ",",
-    "Period": ".",
-    "Slash": "/",
-    "Backquote": "`",
-    "ArrowUp": "Up",
-    "ArrowDown": "Down",
-    "ArrowLeft": "Left",
-    "ArrowRight": "Right",
+    Space: "Space",
+    Enter: "Enter",
+    NumpadEnter: "Enter",
+    Escape: "Escape",
+    Backspace: "Delete",
+    Delete: "ForwardDelete",
+    Tab: "Tab",
+    ControlLeft: "Ctrl",
+    ControlRight: "RCtrl",
+    AltLeft: "Alt",
+    AltRight: "RAlt",
+    ShiftLeft: "Shift",
+    ShiftRight: "RShift",
+    MetaLeft: "Cmd",
+    MetaRight: "RCmd",
+    OSLeft: "Cmd",
+    OSRight: "RCmd",
+    Minus: "-",
+    Equal: "=",
+    BracketLeft: "[",
+    BracketRight: "]",
+    Backslash: "\\",
+    Semicolon: ";",
+    Quote: "'",
+    Comma: ",",
+    Period: ".",
+    Slash: "/",
+    Backquote: "`",
+    ArrowUp: "Up",
+    ArrowDown: "Down",
+    ArrowLeft: "Left",
+    ArrowRight: "Right",
   };
   return map[code];
+}
+
+const DOM_MODIFIERS = [
+  { active: (event: KeyboardEvent) => event.ctrlKey, names: ["Ctrl", "RCtrl"] },
+  { active: (event: KeyboardEvent) => event.altKey, names: ["Alt", "RAlt"] },
+  {
+    active: (event: KeyboardEvent) => event.shiftKey,
+    names: ["Shift", "RShift"],
+  },
+  { active: (event: KeyboardEvent) => event.metaKey, names: ["Cmd", "RCmd"] },
+] as const;
+
+/**
+ * Reconcile the captured chord with the modifier snapshot carried by every DOM
+ * keyboard event. On Wayland a compositor may withhold an individual Super or
+ * modifier keydown while still reporting `metaKey`/`ctrlKey` on the next event.
+ * Reading only `event.code` therefore made capture depend on modifier order.
+ */
+export function reconcileDomModifierKeys(
+  keys: Set<number>,
+  event: KeyboardEvent,
+): void {
+  for (const modifier of DOM_MODIFIERS) {
+    const keycodes = modifier.names
+      .map((name) => getKeycodeFromKeyName(name))
+      .filter((keycode): keycode is number => keycode !== undefined);
+    const hasEitherSide = keycodes.some((keycode) => keys.has(keycode));
+
+    if (modifier.active(event)) {
+      if (!hasEitherSide && keycodes[0] !== undefined) {
+        keys.add(keycodes[0]);
+      }
+    } else {
+      for (const keycode of keycodes) keys.delete(keycode);
+    }
+  }
 }
 
 /**
@@ -237,6 +277,11 @@ export function ShortcutInput({
     setRecordingStateMutation.mutate(false);
   };
 
+  const handleClearShortcut = () => {
+    handleCancelRecording();
+    onChange([]);
+  };
+
   const isLinux = window.electronAPI?.platform === "linux";
 
   const processCompletedKeys = (completedKeys: number[]) => {
@@ -289,21 +334,22 @@ export function ShortcutInput({
     const handleKeyDown = (e: KeyboardEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      
+
       const keyName = mapDomCodeToAmicalKey(e.code);
       if (!keyName) return;
-      
+
       const keycode = getKeycodeFromKeyName(keyName);
       if (keycode === undefined) return;
-      
+
       const currentKeys = new Set(recordingStateRef.current.activeKeys);
       currentKeys.add(keycode);
-      
+      reconcileDomModifierKeys(currentKeys, e);
+
       const { state, completedKeys } = handleActiveKeysEmission(
         recordingStateRef.current,
-        Array.from(currentKeys)
+        Array.from(currentKeys),
       );
-      
+
       recordingStateRef.current = state;
       setActiveKeys(state.activeKeys);
 
@@ -315,24 +361,25 @@ export function ShortcutInput({
     const handleKeyUp = (e: KeyboardEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      
+
       const keyName = mapDomCodeToAmicalKey(e.code);
       if (!keyName) return;
-      
+
       const keycode = getKeycodeFromKeyName(keyName);
       if (keycode === undefined) return;
-      
+
       const currentKeys = new Set(recordingStateRef.current.activeKeys);
       currentKeys.delete(keycode);
-      
+      reconcileDomModifierKeys(currentKeys, e);
+
       const { state, completedKeys } = handleActiveKeysEmission(
         recordingStateRef.current,
-        Array.from(currentKeys)
+        Array.from(currentKeys),
       );
-      
+
       recordingStateRef.current = state;
       setActiveKeys(state.activeKeys);
-      
+
       if (completedKeys) {
         processCompletedKeys(completedKeys);
       }
@@ -340,7 +387,7 @@ export function ShortcutInput({
 
     document.addEventListener("keydown", handleKeyDown);
     document.addEventListener("keyup", handleKeyUp);
-    
+
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("keyup", handleKeyUp);
@@ -391,4 +438,3 @@ export function ShortcutInput({
     </TooltipProvider>
   );
 }
-

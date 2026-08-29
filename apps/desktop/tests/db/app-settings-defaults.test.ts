@@ -6,6 +6,7 @@ import {
   getAppSettings,
   updateSettingsSection,
 } from "../../src/db/app-settings";
+import { LINUX_DEFAULT_SHORTCUTS } from "../../src/utils/linux-default-shortcuts";
 
 /**
  * First-run seeding of dictation defaults: concrete languages (English + the
@@ -82,6 +83,16 @@ describe("default settings seed", () => {
     for (const bindings of Object.values(settings.shortcuts ?? {})) {
       expect(bindings).toHaveLength(1);
       expect(bindings?.[0]?.length).toBeGreaterThan(0);
+    }
+    if (process.platform === "linux") {
+      expect(settings.shortcuts).toEqual(
+        Object.fromEntries(
+          Object.entries(LINUX_DEFAULT_SHORTCUTS).map(([type, chord]) => [
+            type,
+            [[...chord]],
+          ]),
+        ),
+      );
     }
   });
 

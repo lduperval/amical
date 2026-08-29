@@ -101,10 +101,17 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
 }) => {
   const { t } = useTranslation();
   const [isHovered, setIsHovered] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const leaveTimeoutRef = useRef<NodeJS.Timeout | null>(null); // Ref for debounce timeout
   const clickTimeRef = useRef<number | null>(null); // Track when user clicked
+  const dragPointerRef = useRef<{
+    pointerId: number;
+    screenX: number;
+    screenY: number;
+  } | null>(null);
 
   const openNotesWindow = api.widget.openNotesWindow.useMutation();
+  const dragWidget = api.widget.drag.useMutation();
   const noteWindowFeatureFlag = useFeatureFlag(NOTE_WINDOW_FEATURE_FLAG);
 
   // Release the hover pass-through reason if the FAB unmounts mid-hover (e.g.
@@ -113,6 +120,7 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
   useEffect(() => {
     return () => {
       setPassThroughReason("hover", false);
+      setPassThroughReason("drag", false);
     };
   }, []);
 
@@ -130,6 +138,7 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
   const isNoteWindowEnabled = noteWindowFeatureFlag.enabled;
   // Draft (instruct) session: show a distinct indicator while dictating + processing.
   const isDraft = recordingStatus.isDraft;
+  const isLinux = window.electronAPI?.platform === "linux";
 
   // Track when recording state changes to "recording" after a click
   useEffect(() => {
@@ -218,7 +227,72 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
     setPassThroughReason("hover", true);
   };
 
-  const isWidgetActive = isRecording || isStopping || isHovered;
+  const handleDragPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    // Reserve the primary button for recording. Middle-button dragging avoids
+    // accidental movement during the control's normal click interaction.
+    if (event.button !== 1) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    dragPointerRef.current = {
+      pointerId: event.pointerId,
+      screenX: event.screenX,
+      screenY: event.screenY,
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setIsDragging(true);
+    setPassThroughReason("drag", true);
+    dragWidget.mutate({
+      phase: "start",
+      screenX: event.screenX,
+      screenY: event.screenY,
+    });
+  };
+
+  const handleDragPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const dragPointer = dragPointerRef.current;
+    if (!dragPointer || dragPointer.pointerId !== event.pointerId) {
+      return;
+    }
+
+    event.preventDefault();
+    dragPointer.screenX = event.screenX;
+    dragPointer.screenY = event.screenY;
+    dragWidget.mutate({
+      phase: "move",
+      screenX: event.screenX,
+      screenY: event.screenY,
+    });
+  };
+
+  const finishDrag = (
+    event: React.PointerEvent<HTMLDivElement>,
+    useLastPoint = false,
+  ) => {
+    const dragPointer = dragPointerRef.current;
+    if (!dragPointer || dragPointer.pointerId !== event.pointerId) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    const screenX = useLastPoint ? dragPointer.screenX : event.screenX;
+    const screenY = useLastPoint ? dragPointer.screenY : event.screenY;
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    dragPointerRef.current = null;
+    setIsDragging(false);
+    dragWidget.mutate({ phase: "end", screenX, screenY });
+    setPassThroughReason("drag", false);
+  };
+
+  // Linux uses this control as the primary fallback on desktops without the
+  // Global Shortcuts portal, so keep the full button visible and clickable
+  // instead of collapsing it to the subtle hover-only strip.
+  const isWidgetActive = isLinux || isRecording || isStopping || isHovered;
   const showNotesAction =
     isNoteWindowEnabled && isHovered && !isRecording && !isStopping;
   const sizeClass = !isWidgetActive
@@ -267,6 +341,7 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
           className="justify-center items-center flex flex-1 gap-1 h-full"
           role="button"
           onClick={handleButtonClick}
+          aria-label={isRecording ? "Recording" : "Start recording"}
         >
           {isDraft && <DraftPen />}
           <WaveformVisualization
@@ -293,12 +368,19 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
     <div
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
+      onPointerDown={handleDragPointerDown}
+      onPointerMove={handleDragPointerMove}
+      onPointerUp={finishDrag}
+      onPointerCancel={(event) => finishDrag(event, true)}
+      onAuxClick={(event) => {
+        if (event.button === 1) event.preventDefault();
+      }}
       className={`
         transition-all duration-200 ease-in-out
         ${sizeClass}
         bg-black/70 rounded-[24px] backdrop-blur-md ring-[1px] ring-black/60 shadow-[0px_0px_15px_0px_rgba(0,0,0,0.40)]
         before:content-[''] before:absolute before:inset-[1px] before:rounded-[23px] before:outline before:outline-white/15 before:pointer-events-none
-        mb-2 cursor-pointer select-none
+        mb-2 ${isDragging ? "cursor-grabbing" : "cursor-pointer"} select-none
       `}
       style={{ pointerEvents: "auto" }}
     >

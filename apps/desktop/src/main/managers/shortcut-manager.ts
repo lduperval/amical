@@ -192,7 +192,7 @@ export class ShortcutManager extends EventEmitter {
    * retained only as this grouping and may be collapsed later. Empty chords are
    * dropped.
    */
-  private async syncShortcutsToNative() {
+  private async syncShortcutsToNative(): Promise<boolean> {
     try {
       const subsetChords = [
         ...this.shortcuts.pushToTalk,
@@ -203,10 +203,19 @@ export class ShortcutManager extends EventEmitter {
         ...this.shortcuts.pasteLastTranscript,
         ...this.shortcuts.newNote,
       ].filter((chord) => chord.length > 0);
-      await this.nativeBridge.setShortcuts({ subsetChords, exactChords });
-      log.info("Shortcuts synced to native helper");
+      const success = await this.nativeBridge.setShortcuts({
+        subsetChords,
+        exactChords,
+      });
+      if (success) {
+        log.info("Shortcuts synced to native helper");
+      } else {
+        log.warn("Native helper could not register global shortcuts");
+      }
+      return success;
     } catch (error) {
       log.error("Failed to sync shortcuts to native helper", { error });
+      return false;
     }
   }
 
@@ -524,7 +533,16 @@ export class ShortcutManager extends EventEmitter {
     log.info("Shortcut bindings updated", { type, bindings });
 
     // Sync to native helper
-    await this.syncShortcutsToNative();
+    const nativeShortcutsAvailable = await this.syncShortcutsToNative();
+
+    if (process.platform === "linux" && nativeShortcutsAvailable === false) {
+      return {
+        ...result,
+        warning: {
+          key: "settings.shortcuts.validation.linuxGlobalShortcutsUnavailable",
+        },
+      };
+    }
 
     return result;
   }

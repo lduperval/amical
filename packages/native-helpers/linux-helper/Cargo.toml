@@ -1,0 +1,37 @@
+[package]
+name = "linux-helper"
+version = "0.1.0"
+edition = "2021"
+description = "Amical native helper for Linux (Wayland). Speaks the JSON-RPC stdin/stdout protocol shared with SwiftHelper and WindowsHelper."
+license = "MIT"
+
+[dependencies]
+# IPC & serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "io-std",
+    "io-util",
+    "sync",
+    "process",
+    "time",
+] }
+
+# DBus (xdg-desktop-portal GlobalShortcuts)
+zbus = { version = "4", default-features = false, features = ["tokio"] }
+
+# Wayland (clipboard via data-control, key injection via virtual-keyboard)
+wayland-client = "0.31"
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+wl-clipboard-rs = "0.9"
+
+# Utilities
+time = { version = "0.3", features = ["formatting"] }
+tempfile = "3"
+futures-util = { version = "0.3", default-features = false }
+
+[profile.release]
+lto = true
+strip = true

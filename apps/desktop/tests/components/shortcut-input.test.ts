@@ -3,7 +3,11 @@
 import React, { useState } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { ShortcutInput } from "../../src/components/shortcut-input";
+import {
+  reconcileDomModifierKeys,
+  ShortcutInput,
+} from "../../src/components/shortcut-input";
+import { getKeycodeFromKeyName } from "../../src/utils/keycode-map";
 
 const mocks = vi.hoisted(() => ({
   setRecordingState: vi.fn(),
@@ -60,6 +64,46 @@ function Harness({
 }
 
 describe("ShortcutInput", () => {
+  it("recovers Wayland modifiers from the event snapshot regardless of keydown order", () => {
+    const keys = new Set<number>();
+
+    reconcileDomModifierKeys(
+      keys,
+      new KeyboardEvent("keydown", {
+        code: "AltLeft",
+        ctrlKey: true,
+        altKey: true,
+        metaKey: true,
+      }),
+    );
+
+    expect(keys).toEqual(
+      new Set([
+        getKeycodeFromKeyName("Ctrl"),
+        getKeycodeFromKeyName("Alt"),
+        getKeycodeFromKeyName("Cmd"),
+      ]),
+    );
+  });
+
+  it("clears a modifier whose keyup was withheld once the event snapshot reports it released", () => {
+    const keys = new Set(
+      ["Ctrl", "Alt", "Cmd"].map((name) => getKeycodeFromKeyName(name)!),
+    );
+
+    reconcileDomModifierKeys(
+      keys,
+      new KeyboardEvent("keyup", {
+        code: "AltLeft",
+        ctrlKey: true,
+        altKey: false,
+        metaKey: false,
+      }),
+    );
+
+    expect(keys).toEqual(new Set([getKeycodeFromKeyName("Ctrl")]));
+  });
+
   it("shows clearing only while an assigned shortcut is being edited", () => {
     render(
       React.createElement(Harness, {
