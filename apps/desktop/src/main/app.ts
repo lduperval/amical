@@ -11,6 +11,22 @@ import { AppManager } from "./core/app-manager";
 import { isWindows } from "../utils/platform";
 import { ServiceManager } from "./managers/service-manager";
 import { isSilentStart } from "./launch-options";
+import { shouldUseXWaylandForFloatingWidget } from "../utils/linux-windowing";
+
+// Electron 38 defaults to native Wayland, where positioned/topmost inactive
+// utility windows are unsupported. Select XWayland before app readiness so the
+// floating recording widget can be placed and shown reliably. This does not
+// affect the DBus Global Shortcuts portal used on GNOME 48+.
+if (
+  shouldUseXWaylandForFloatingWidget({
+    platform: process.platform,
+    sessionType: process.env.XDG_SESSION_TYPE,
+    argv: process.argv,
+  })
+) {
+  app.commandLine.appendSwitch("ozone-platform", "x11");
+  logger.main.info("Using XWayland for floating widget support");
+}
 
 // Drop expired certs before they become trust anchors (see the merge below).
 function notExpired(pem: string): boolean {
@@ -217,3 +233,4 @@ app.on("activate", () => {
   }
   hasActivated = true;
 });
+

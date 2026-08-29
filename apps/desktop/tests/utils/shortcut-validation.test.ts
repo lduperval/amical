@@ -3,6 +3,7 @@ import {
   checkAlphanumericOnly,
   checkDuplicateModifierPairs,
   checkMaxKeysLength,
+  checkLinuxPortalCompatibility,
   type ShortcutType,
   validateShortcutBindings,
 } from "../../src/utils/shortcut-validation";
@@ -16,6 +17,21 @@ const shortcuts = {
 };
 
 describe("shortcut validation", () => {
+  it("rejects modifier-only chords that the Wayland portal cannot represent", () => {
+    expect(checkLinuxPortalCompatibility([59, 55, 58], "linux")).toEqual({
+      valid: false,
+      error: {
+        key: "settings.shortcuts.validation.linuxPortalTriggerRequired",
+      },
+    });
+  });
+
+  it("accepts one Wayland portal trigger key plus modifiers", () => {
+    expect(checkLinuxPortalCompatibility([59, 55, 58, 49], "linux")).toEqual({
+      valid: true,
+    });
+  });
+
   it.each<ShortcutType>([
     "toggleRecording",
     "pasteLastTranscript",
