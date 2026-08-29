@@ -2,8 +2,12 @@
 
 import React from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RecordingStatus } from "@/hooks/useRecording";
+
+const mocks = vi.hoisted(() => ({
+  dragWidget: vi.fn(),
+}));
 
 vi.mock("@/components/Waveform", () => ({
   Waveform: () => null,
@@ -19,6 +23,9 @@ vi.mock("@/trpc/react", () => ({
       openNotesWindow: {
         useMutation: () => ({ mutateAsync: vi.fn() }),
       },
+      drag: {
+        useMutation: () => ({ mutate: mocks.dragWidget }),
+      },
     },
   },
 }));
@@ -33,7 +40,97 @@ vi.mock("react-i18next", () => ({
 
 import { FloatingButton } from "@/renderer/widget/pages/widget/components/FloatingButton";
 
+afterEach(() => {
+  vi.clearAllMocks();
+  Object.defineProperty(window, "electronAPI", {
+    configurable: true,
+    value: undefined,
+  });
+});
+
 describe("FloatingButton recording triggers", () => {
+  it("keeps an idle Linux recording control visible and clickable", () => {
+    Object.defineProperty(window, "electronAPI", {
+      configurable: true,
+      value: { platform: "linux" },
+    });
+    const startRecording = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      React.createElement(FloatingButton, {
+        recordingStatus: {
+          sessionId: null,
+          state: "idle",
+          mode: "ptt",
+          isDraft: false,
+          stopKind: "none",
+          stopOrigin: "none",
+        },
+        audioLevels: [],
+        startRecording,
+        stopRecording: vi.fn(),
+        dismissRecording: vi.fn(),
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Start recording" }));
+    expect(startRecording).toHaveBeenCalledOnce();
+  });
+
+  it("moves the bubble with a middle-button pointer drag", () => {
+    Object.defineProperty(window, "electronAPI", {
+      configurable: true,
+      value: { platform: "linux" },
+    });
+
+    render(
+      React.createElement(FloatingButton, {
+        recordingStatus: {
+          sessionId: null,
+          state: "idle",
+          mode: "ptt",
+          isDraft: false,
+          stopKind: "none",
+          stopOrigin: "none",
+        },
+        audioLevels: [],
+        startRecording: vi.fn(),
+        stopRecording: vi.fn(),
+        dismissRecording: vi.fn(),
+      }),
+    );
+
+    const button = screen.getByRole("button", { name: "Start recording" });
+    const bubble = button.parentElement?.parentElement;
+    expect(bubble).not.toBeNull();
+
+    fireEvent.pointerDown(bubble!, {
+      button: 1,
+      buttons: 4,
+      pointerId: 7,
+      screenX: 100,
+      screenY: 200,
+    });
+    fireEvent.pointerMove(bubble!, {
+      buttons: 4,
+      pointerId: 7,
+      screenX: 140,
+      screenY: 230,
+    });
+    fireEvent.pointerUp(bubble!, {
+      button: 1,
+      pointerId: 7,
+      screenX: 140,
+      screenY: 230,
+    });
+
+    expect(mocks.dragWidget.mock.calls.map(([input]) => input)).toEqual([
+      { phase: "start", screenX: 100, screenY: 200 },
+      { phase: "move", screenX: 140, screenY: 230 },
+      { phase: "end", screenX: 140, screenY: 230 },
+    ]);
+  });
+
   it.each([
     {
       state: "recording",

@@ -1,0 +1,33 @@
+xkb_keymap {
+    xkb_keycodes "amical" {
+        minimum = 8;
+        maximum = 255;
+        <LCTL> = 37;
+        <LFSH> = 50;
+        <KC>   = 54;
+        <KV>   = 55;
+        <INS>  = 118;
+    };
+    xkb_types "amical" {
+        type "ONE_LEVEL" {
+            modifiers = none;
+            map[none] = Level1;
+            level_name[Level1] = "Any";
+        };
+    };
+    xkb_compatibility "amical" {
+        interpret Control_L {
+            action = SetMods(modifiers=Control);
+        };
+        interpret Shift_L {
+            action = SetMods(modifiers=Shift);
+        };
+    };
+    xkb_symbols "amical" {
+        key <LCTL> { [ Control_L ] };
+        key <LFSH> { [ Shift_L ] };
+        key <KC>   { [ c ] };
+        key <KV>   { [ v ] };
+        key <INS>  { [ Insert ] };
+    };
+};

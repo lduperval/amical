@@ -1,0 +1,28 @@
+{
+  "name": "@amical/linux-helper",
+  "version": "0.1.0",
+  "description": "Rust native helper for Wayland integration on Linux",
+  "private": true,
+  "scripts": {
+    "build": "turbo run build:native",
+    "build:native": "cargo build --release && mkdir -p bin && cp target/release/linux-helper bin/linux-helper",
+    "clean": "rm -rf target bin .turbo",
+    "dev": "cargo build && mkdir -p bin && cp target/debug/linux-helper bin/linux-helper"
+  },
+  "files": [
+    "bin/*"
+  ],
+  "keywords": [
+    "rust",
+    "native",
+    "wayland",
+    "linux"
+  ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}
