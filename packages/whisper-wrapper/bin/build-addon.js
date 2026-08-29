@@ -350,12 +350,15 @@ for (const variant of variants) {
     `-d "${addonDir}"`,
     "-T whisper_node",
     "--CD node_runtime=node",
+    "--CDCMAKE_POSITION_INDEPENDENT_CODE=ON",
   ];
 
   if (platform === "win32" && arch === "arm64") {
     cmakeParts.push("--toolset ClangCL");
     // Avoid a runtime dependency on LLVM's libomp.dll, which is available on
     // the build runner but is not part of the packaged desktop application.
+    cmakeParts.push("--CDGGML_OPENMP=OFF");
+  } else if (platform === "linux") {
     cmakeParts.push("--CDGGML_OPENMP=OFF");
   }
 

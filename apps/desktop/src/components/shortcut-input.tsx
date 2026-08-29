@@ -4,7 +4,7 @@ import { Pencil, Trash2, X } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { api } from "@/trpc/react";
 import { toast } from "sonner";
-import { getKeyFromKeycode, keycodeToDisplay } from "@/utils/keycode-map";
+import { getKeyFromKeycode, keycodeToDisplay, getKeycodeFromKeyName } from "@/utils/keycode-map";
 import {
   handleActiveKeysEmission,
   initialShortcutRecordingState,
@@ -46,6 +46,48 @@ type ValidationResult = {
 function isModifierKeycode(keycode: number): boolean {
   const name = getKeyFromKeycode(keycode);
   return name ? MODIFIER_KEYS.has(name) : false;
+}
+
+function mapDomCodeToAmicalKey(code: string): string | undefined {
+  if (code.startsWith("Key")) return code.slice(3);
+  if (code.startsWith("Digit")) return code.slice(5);
+  if (code.startsWith("F") && code.length <= 3) return code;
+  
+  const map: Record<string, string> = {
+    "Space": "Space",
+    "Enter": "Enter",
+    "NumpadEnter": "Enter",
+    "Escape": "Escape",
+    "Backspace": "Delete", 
+    "Delete": "ForwardDelete",
+    "Tab": "Tab",
+    "ControlLeft": "Ctrl",
+    "ControlRight": "RCtrl",
+    "AltLeft": "Alt",
+    "AltRight": "RAlt",
+    "ShiftLeft": "Shift",
+    "ShiftRight": "RShift",
+    "MetaLeft": "Cmd",
+    "MetaRight": "RCmd",
+    "OSLeft": "Cmd",
+    "OSRight": "RCmd",
+    "Minus": "-",
+    "Equal": "=",
+    "BracketLeft": "[",
+    "BracketRight": "]",
+    "Backslash": "\\",
+    "Semicolon": ";",
+    "Quote": "'",
+    "Comma": ",",
+    "Period": ".",
+    "Slash": "/",
+    "Backquote": "`",
+    "ArrowUp": "Up",
+    "ArrowDown": "Down",
+    "ArrowLeft": "Left",
+    "ArrowRight": "Right",
+  };
+  return map[code];
 }
 
 /**
@@ -195,9 +237,24 @@ export function ShortcutInput({
     setRecordingStateMutation.mutate(false);
   };
 
-  const handleClearShortcut = () => {
-    handleCancelRecording();
-    onChange([]);
+  const isLinux = window.electronAPI?.platform === "linux";
+
+  const processCompletedKeys = (completedKeys: number[]) => {
+    const result = validateShortcutFormat(completedKeys);
+
+    if (result.valid && result.shortcut) {
+      // Basic format is valid - let parent handle backend validation
+      onChange(result.shortcut);
+    } else {
+      toast.error(
+        result.error
+          ? t(result.error.key, result.error.params)
+          : t("settings.shortcuts.validation.invalidKeyCombination"),
+      );
+    }
+
+    onRecordingShortcutChange(false);
+    setRecordingStateMutation.mutate(false);
   };
 
   // Subscribe to key events when recording. Keys held before recording
@@ -205,7 +262,7 @@ export function ShortcutInput({
   // re-edit) are ignored until the set drains to empty — see
   // handleActiveKeysEmission.
   api.settings.activeKeysUpdates.useSubscription(undefined, {
-    enabled: isRecordingShortcut,
+    enabled: isRecordingShortcut && !isLinux,
     onData: (keys: number[]) => {
       const { state, completedKeys } = handleActiveKeysEmission(
         recordingStateRef.current,
@@ -216,27 +273,79 @@ export function ShortcutInput({
 
       // A key was released: validate the combination held just before it
       if (completedKeys) {
-        const result = validateShortcutFormat(completedKeys);
-
-        if (result.valid && result.shortcut) {
-          // Basic format is valid - let parent handle backend validation
-          onChange(result.shortcut);
-        } else {
-          toast.error(
-            result.error
-              ? t(result.error.key, result.error.params)
-              : t("settings.shortcuts.validation.invalidKeyCombination"),
-          );
-        }
-
-        onRecordingShortcutChange(false);
-        setRecordingStateMutation.mutate(false);
+        processCompletedKeys(completedKeys);
       }
     },
     onError: (error) => {
       console.error("Error subscribing to active keys", error);
     },
   });
+
+  // On Linux, the native helper cannot capture raw key events globally due to
+  // Wayland restrictions. Instead, we capture DOM events when the input is focused.
+  useEffect(() => {
+    if (!isRecordingShortcut || !isLinux) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      const keyName = mapDomCodeToAmicalKey(e.code);
+      if (!keyName) return;
+      
+      const keycode = getKeycodeFromKeyName(keyName);
+      if (keycode === undefined) return;
+      
+      const currentKeys = new Set(recordingStateRef.current.activeKeys);
+      currentKeys.add(keycode);
+      
+      const { state, completedKeys } = handleActiveKeysEmission(
+        recordingStateRef.current,
+        Array.from(currentKeys)
+      );
+      
+      recordingStateRef.current = state;
+      setActiveKeys(state.activeKeys);
+
+      if (completedKeys) {
+        processCompletedKeys(completedKeys);
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      const keyName = mapDomCodeToAmicalKey(e.code);
+      if (!keyName) return;
+      
+      const keycode = getKeycodeFromKeyName(keyName);
+      if (keycode === undefined) return;
+      
+      const currentKeys = new Set(recordingStateRef.current.activeKeys);
+      currentKeys.delete(keycode);
+      
+      const { state, completedKeys } = handleActiveKeysEmission(
+        recordingStateRef.current,
+        Array.from(currentKeys)
+      );
+      
+      recordingStateRef.current = state;
+      setActiveKeys(state.activeKeys);
+      
+      if (completedKeys) {
+        processCompletedKeys(completedKeys);
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("keyup", handleKeyUp);
+    
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("keyup", handleKeyUp);
+    };
+  }, [isRecordingShortcut, isLinux]);
 
   // Reset state when recording starts
   useEffect(() => {
@@ -282,3 +391,4 @@ export function ShortcutInput({
     </TooltipProvider>
   );
 }
+
