@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import { resolve } from "path";
 import { posthogSourceMapPlugins } from "./vite.posthog";
 
@@ -58,4 +58,6 @@ export default defineConfig({
   optimizeDeps: {
     exclude: ["better-sqlite3", "@amical/whisper-wrapper", "drizzle-orm"],
   },
+  };
 });
+

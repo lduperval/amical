@@ -379,6 +379,8 @@ export class NotesWindowController {
       skipTaskbar: true,
       focusable: true,
       hasShadow: false,
+      ...(process.platform === "darwin" && { type: "panel" }),
+      ...(process.platform === "linux" && { type: "utility" }),
       minWidth: NotesWindowController.NOTES_WINDOW_MIN_WIDTH,
       minHeight: NotesWindowController.NOTES_WINDOW_MIN_HEIGHT,
       webPreferences: {
@@ -433,6 +435,8 @@ export class NotesWindowController {
       // Keep Notes above the taskbar; it still shares Windows' topmost band
       // with the widget and third-party overlays.
       this.notesWindow.setAlwaysOnTop(true, "screen-saver");
+    } else if (process.platform === "linux") {
+      this.notesWindow.setAlwaysOnTop(true, "pop-up-menu");
     }
 
     this.options.onWindowCreated(this.notesWindow);
