@@ -397,6 +397,7 @@ export class WindowManager extends EventEmitter {
       hasShadow: false,
       // prevent main window from gaining focus upon clicks on widget
       ...(process.platform === "darwin" && { type: "panel" }),
+      ...(process.platform === "linux" && { type: "utility" }),
       webPreferences: {
         preload: path.join(__dirname, "preload.js"),
         nodeIntegration: false,
@@ -465,6 +466,8 @@ export class WindowManager extends EventEmitter {
       // edges to allow taskbar auto-hide detection.
       // See: https://github.com/electron/electron/issues/11830
       this.widgetWindow.setAlwaysOnTop(true, "screen-saver");
+    } else if (process.platform === "linux") {
+      this.widgetWindow.setAlwaysOnTop(true, "pop-up-menu");
     }
 
     // Set up display change notifications for all platforms

@@ -403,7 +403,9 @@ export class OnboardingService extends EventEmitter {
     accessibility: boolean;
   } {
     const microphone =
-      systemPreferences.getMediaAccessStatus("microphone") === "granted";
+      typeof systemPreferences.getMediaAccessStatus === "function"
+        ? systemPreferences.getMediaAccessStatus("microphone") === "granted"
+        : true; // Linux does not support getMediaAccessStatus, assume granted
 
     const accessibility =
       process.platform === "darwin"

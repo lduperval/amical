@@ -485,7 +485,7 @@
         "description": "Automatically start the application when you log in"
       },
       "showWidgetWhileInactive": {
-        "label": "Show widget while inactive",
+        "label": "Keep record bubble on screen at all times",
         "description": "Keep the widget visible on screen when not recording"
       },
       "showInDock": {
