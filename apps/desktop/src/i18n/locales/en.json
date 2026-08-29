@@ -859,7 +859,9 @@
         "conflictsWithSystem": "{{shortcut}} conflicts with a system shortcut",
         "addModifier": "Add a modifier key like Cmd, Ctrl, or Fn",
         "duplicateModifierPairs": "Can't use both left and right {{modifier}} together",
-        "overlapsWithPushToTalk": "This overlaps with your Push-to-talk shortcut and may cause issues"
+        "overlapsWithPushToTalk": "This overlaps with your Push-to-talk shortcut and may cause issues",
+        "linuxPortalTriggerRequired": "Wayland shortcuts need exactly one non-modifier trigger key, such as Space or a letter",
+        "linuxGlobalShortcutsUnavailable": "Your Wayland desktop does not provide the Global Shortcuts portal. This shortcut was saved, but it cannot trigger Amical; use the floating control instead."
       },
       "input": {
         "pressKeys": "Press keys...",

@@ -6,6 +6,40 @@ import { getMainFeatureFlagState } from "@/main/utils/feature-flags";
 import { NOTE_WINDOW_FEATURE_FLAG } from "@/utils/feature-flags";
 
 export const widgetRouter = createRouter({
+  drag: procedure
+    .input(
+      z.discriminatedUnion("phase", [
+        z.object({
+          phase: z.literal("start"),
+          screenX: z.number().finite(),
+          screenY: z.number().finite(),
+        }),
+        z.object({
+          phase: z.literal("move"),
+          screenX: z.number().finite(),
+          screenY: z.number().finite(),
+        }),
+        z.object({
+          phase: z.literal("end"),
+          screenX: z.number().finite(),
+          screenY: z.number().finite(),
+        }),
+      ]),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const windowManager = ctx.services.windowManager;
+      const point = { x: input.screenX, y: input.screenY };
+
+      if (input.phase === "start") {
+        windowManager.beginWidgetDrag(point);
+      } else if (input.phase === "move") {
+        windowManager.updateWidgetDrag(point);
+      } else {
+        await windowManager.endWidgetDrag(point);
+      }
+      return true;
+    }),
+
   setVisible: procedure
     .input(z.object({ visible: z.boolean() }))
     .mutation(({ ctx, input }) => {

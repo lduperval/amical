@@ -14,6 +14,7 @@ import { EventEmitter } from "events";
 import { Effect, Layer } from "effect";
 import { WindowManagerTag, SettingsServiceTag } from "../runtime/tags";
 import { up } from "../runtime/layer-helpers";
+import type { AppSettingsData } from "../../db/schema";
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string;
 declare const MAIN_WINDOW_VITE_NAME: string;
@@ -29,15 +30,33 @@ interface WindowManagerEvents {
   "window-closing": (window: BrowserWindow) => void;
 }
 
+type WidgetPosition = NonNullable<
+  NonNullable<AppSettingsData["ui"]>["widgetPosition"]
+>;
+
+interface WidgetDragState {
+  pointerStart: Electron.Point;
+  windowStart: Electron.Rectangle;
+}
+
 export class WindowManager extends EventEmitter {
   private static readonly WIDGET_MAX_WIDTH = 640 as const;
   private static readonly WIDGET_MAX_HEIGHT = 320 as const;
+  private static readonly WIDGET_IDLE_WIDTH = 96 as const;
+  private static readonly WIDGET_IDLE_HEIGHT = 24 as const;
+  private static readonly WIDGET_BOTTOM_MARGIN = 8 as const;
+  private static readonly WIDGET_LINUX_BOTTOM_CLEARANCE = 24 as const;
+  private static readonly WIDGET_MAX_CONTROL_WIDTH = 124 as const;
+  private static readonly WIDGET_SCREEN_MARGIN = 8 as const;
   private mainWindow: BrowserWindow | null = null;
   private widgetWindow: BrowserWindow | null = null;
   private notesWindowController: NotesWindowController;
   private onboardingWindow: BrowserWindow | null = null;
   private widgetDisplayId: number | null = null;
   private cursorPollingInterval: NodeJS.Timeout | null = null;
+  private cursorDisplayCandidateId: number | null = null;
+  private widgetPosition: WidgetPosition | null = null;
+  private widgetDragState: WidgetDragState | null = null;
   private themeListenerSetup: boolean = false;
 
   // On Windows, inset from all edges to allow taskbar auto-hide detection
@@ -74,7 +93,15 @@ export class WindowManager extends EventEmitter {
     const width = Math.min(WindowManager.WIDGET_MAX_WIDTH, maxWidth);
     const height = Math.min(WindowManager.WIDGET_MAX_HEIGHT, maxHeight);
     const x = workArea.x + Math.round((workArea.width - width) / 2);
-    const y = workArea.y + workArea.height - height - inset;
+    // GNOME's dock is commonly configured at the bottom. Keep a visible gap
+    // beyond the compositor-reported work area so the control does not look
+    // attached to (or overlap, with some XWayland scaling combinations) the
+    // dock.
+    const bottomClearance =
+      process.platform === "linux"
+        ? WindowManager.WIDGET_LINUX_BOTTOM_CLEARANCE
+        : 0;
+    const y = workArea.y + workArea.height - height - inset - bottomClearance;
 
     return {
       x,
@@ -82,6 +109,72 @@ export class WindowManager extends EventEmitter {
       width,
       height,
     };
+  }
+
+  private getWidgetAnchor(bounds: Electron.Rectangle): Electron.Point {
+    return {
+      x: bounds.x + Math.round(bounds.width / 2),
+      y:
+        bounds.y +
+        bounds.height -
+        WindowManager.WIDGET_BOTTOM_MARGIN -
+        Math.round(WindowManager.WIDGET_IDLE_HEIGHT / 2),
+    };
+  }
+
+  private clampWidgetBoundsToWorkArea(
+    bounds: Electron.Rectangle,
+    workArea: Electron.Rectangle,
+  ): Electron.Rectangle {
+    const anchor = this.getWidgetAnchor(bounds);
+    const halfControlWidth = Math.round(
+      WindowManager.WIDGET_MAX_CONTROL_WIDTH / 2,
+    );
+    const halfControlHeight = Math.round(WindowManager.WIDGET_IDLE_HEIGHT / 2);
+    const margin = WindowManager.WIDGET_SCREEN_MARGIN;
+    const minAnchorX = workArea.x + margin + halfControlWidth;
+    const maxAnchorX = workArea.x + workArea.width - margin - halfControlWidth;
+    const minAnchorY = workArea.y + margin + halfControlHeight;
+    const maxAnchorY =
+      workArea.y + workArea.height - margin - halfControlHeight;
+    const clampedAnchorX = Math.min(
+      Math.max(anchor.x, minAnchorX),
+      Math.max(minAnchorX, maxAnchorX),
+    );
+    const clampedAnchorY = Math.min(
+      Math.max(anchor.y, minAnchorY),
+      Math.max(minAnchorY, maxAnchorY),
+    );
+
+    return {
+      ...bounds,
+      x: bounds.x + clampedAnchorX - anchor.x,
+      y: bounds.y + clampedAnchorY - anchor.y,
+    };
+  }
+
+  private getWidgetBoundsForWorkArea(
+    workArea: Electron.Rectangle,
+  ): Electron.Rectangle {
+    const defaultBounds = this.getWidgetDefaultBounds(workArea);
+    if (!this.widgetPosition) {
+      return defaultBounds;
+    }
+
+    const defaultAnchor = this.getWidgetAnchor(defaultBounds);
+    const desiredAnchor = {
+      x: workArea.x + Math.round(workArea.width * this.widgetPosition.xRatio),
+      y: workArea.y + Math.round(workArea.height * this.widgetPosition.yRatio),
+    };
+
+    return this.clampWidgetBoundsToWorkArea(
+      {
+        ...defaultBounds,
+        x: defaultBounds.x + desiredAnchor.x - defaultAnchor.x,
+        y: defaultBounds.y + desiredAnchor.y - defaultAnchor.y,
+      },
+      workArea,
+    );
   }
 
   private getActiveWidgetDisplayWorkArea(): Electron.Rectangle {
@@ -374,12 +467,18 @@ export class WindowManager extends EventEmitter {
   }
 
   async createWidgetWindow(): Promise<void> {
-    const mainScreen = screen.getPrimaryDisplay();
-    const widgetBounds = this.getWidgetDefaultBounds(mainScreen.workArea);
+    const initialCursorPoint = screen.getCursorScreenPoint();
+    const initialDisplay = screen.getDisplayNearestPoint(initialCursorPoint);
+    const uiSettings = await this.settingsService.getUISettings();
+    this.widgetPosition = uiSettings.widgetPosition ?? null;
+    const widgetBounds = this.getWidgetBoundsForWorkArea(
+      initialDisplay.workArea,
+    );
 
     logger.main.info("Creating widget window", {
-      display: mainScreen.id,
-      workArea: mainScreen.workArea,
+      display: initialDisplay.id,
+      cursorPoint: initialCursorPoint,
+      workArea: initialDisplay.workArea,
       widgetBounds,
       edgeInset: this.widgetEdgeInset,
     });
@@ -405,7 +504,7 @@ export class WindowManager extends EventEmitter {
       },
     });
 
-    this.widgetDisplayId = mainScreen.id;
+    this.widgetDisplayId = initialDisplay.id;
 
     // Set pass-through mode in normal widget state
     this.setWidgetIgnoreMouseEvents(true);
@@ -429,6 +528,15 @@ export class WindowManager extends EventEmitter {
       this.widgetWindow.loadFile(widgetPath);
     }
 
+    // The renderer normally owns visibility, but a hidden transparent window
+    // can be heavily throttled on Linux before its subscription/mutation pair
+    // runs. Apply the persisted idle visibility directly after the document
+    // loads as a reliable startup baseline; later renderer state still wins.
+    const createdWidgetWindow = this.widgetWindow;
+    createdWidgetWindow.webContents.once("did-finish-load", () => {
+      void this.showIdleWidgetAfterLoad(createdWidgetWindow);
+    });
+
     this.widgetWindow.on("close", () => {
       // "close" fires before destruction — the window is still live here.
       this.emit("window-closing", this.widgetWindow!);
@@ -443,8 +551,11 @@ export class WindowManager extends EventEmitter {
       if (!this.widgetWindow || this.widgetWindow.isDestroyed()) {
         return;
       }
-      const display = screen.getDisplayMatching(this.widgetWindow.getBounds());
+      const display = screen.getDisplayNearestPoint(
+        this.getWidgetAnchor(this.widgetWindow.getBounds()),
+      );
       this.widgetDisplayId = display.id;
+      this.cursorDisplayCandidateId = null;
     });
 
     if (process.platform === "darwin") {
@@ -576,6 +687,22 @@ export class WindowManager extends EventEmitter {
     }
   }
 
+  private async showIdleWidgetAfterLoad(window: BrowserWindow): Promise<void> {
+    try {
+      const preferences = await this.settingsService.getPreferences();
+      if (
+        preferences.showWidgetWhileInactive &&
+        this.widgetWindow === window &&
+        !window.isDestroyed()
+      ) {
+        this.showWidget();
+        logger.main.info("Showed idle widget from persisted preference");
+      }
+    } catch (error) {
+      logger.main.error("Failed to apply initial widget visibility", error);
+    }
+  }
+
   hideWidget(): void {
     if (this.widgetWindow && !this.widgetWindow.isDestroyed()) {
       this.widgetWindow.hide();
@@ -610,9 +737,10 @@ export class WindowManager extends EventEmitter {
     // Set up focus-based display detection
     this.setupFocusBasedDisplayDetection();
 
-    // Set up cursor polling to detect when user moves to different display
-    // we want to avoid polling mechanisms, we will get back to this if current soln doesn't work
-    // this.startCursorPolling();
+    // Electron does not expose an event for the pointer crossing displays.
+    // Follow it with a lightweight poll so the recording control is available
+    // beside the text field the user is currently working in.
+    this.startCursorPolling();
 
     // macOS-specific workspace change notifications
     if (process.platform === "darwin") {
@@ -655,25 +783,44 @@ export class WindowManager extends EventEmitter {
       });
 
       this.widgetDisplayId = focusedWindowDisplay.id;
+      this.cursorDisplayCandidateId = null;
 
       // Update widget window bounds to new display
       if (this.widgetWindow && !this.widgetWindow.isDestroyed()) {
         this.widgetWindow.setBounds(
-          this.getWidgetDefaultBounds(focusedWindowDisplay.workArea),
+          this.getWidgetBoundsForWorkArea(focusedWindowDisplay.workArea),
         );
       }
     });
   }
 
   private startCursorPolling(): void {
-    // Poll cursor position every 500ms to detect display changes
+    if (this.cursorPollingInterval) {
+      return;
+    }
+
+    // Require the cursor to remain on the new display for two samples. This
+    // avoids bouncing the widget when the pointer briefly grazes a monitor
+    // boundary while keeping the move perceptually immediate.
     this.cursorPollingInterval = setInterval(() => {
-      if (!this.widgetWindow || this.widgetWindow.isDestroyed()) return;
+      if (
+        this.widgetDragState ||
+        !this.widgetWindow ||
+        this.widgetWindow.isDestroyed()
+      ) {
+        return;
+      }
 
       const cursorPoint = screen.getCursorScreenPoint();
       const cursorDisplay = screen.getDisplayNearestPoint(cursorPoint);
 
       if (cursorDisplay.id === this.widgetDisplayId) {
+        this.cursorDisplayCandidateId = null;
+        return;
+      }
+
+      if (this.cursorDisplayCandidateId !== cursorDisplay.id) {
+        this.cursorDisplayCandidateId = cursorDisplay.id;
         return;
       }
 
@@ -685,12 +832,14 @@ export class WindowManager extends EventEmitter {
       });
 
       this.widgetDisplayId = cursorDisplay.id;
+      this.cursorDisplayCandidateId = null;
 
       // Update widget window bounds to new display
       this.widgetWindow.setBounds(
-        this.getWidgetDefaultBounds(cursorDisplay.workArea),
+        this.getWidgetBoundsForWorkArea(cursorDisplay.workArea),
       );
-    }, 500); // Poll every 500ms
+    }, 200);
+    this.cursorPollingInterval.unref();
 
     logger.main.info("Started cursor polling for display detection");
   }
@@ -706,9 +855,10 @@ export class WindowManager extends EventEmitter {
 
     // Update window bounds to match new display's work area
     this.widgetWindow.setBounds(
-      this.getWidgetDefaultBounds(currentDisplay.workArea),
+      this.getWidgetBoundsForWorkArea(currentDisplay.workArea),
     );
     this.widgetDisplayId = currentDisplay.id;
+    this.cursorDisplayCandidateId = null;
     logger.main.info("Display configuration changed", {
       displayId: currentDisplay.id,
       workArea: currentDisplay.workArea,
@@ -716,12 +866,123 @@ export class WindowManager extends EventEmitter {
     });
   }
 
+  beginWidgetDrag(point: Electron.Point): void {
+    if (!this.widgetWindow || this.widgetWindow.isDestroyed()) {
+      return;
+    }
+
+    this.widgetDragState = {
+      pointerStart: point,
+      windowStart: this.widgetWindow.getBounds(),
+    };
+    this.cursorDisplayCandidateId = null;
+  }
+
+  updateWidgetDrag(point: Electron.Point): void {
+    const window = this.widgetWindow;
+    const drag = this.widgetDragState;
+    if (!drag || !window || window.isDestroyed()) {
+      return;
+    }
+
+    const display = screen.getDisplayNearestPoint(point);
+    const nextBounds = this.clampWidgetBoundsToWorkArea(
+      {
+        ...drag.windowStart,
+        x: drag.windowStart.x + point.x - drag.pointerStart.x,
+        y: drag.windowStart.y + point.y - drag.pointerStart.y,
+      },
+      display.workArea,
+    );
+    window.setBounds(nextBounds);
+    this.widgetDisplayId = display.id;
+    this.cursorDisplayCandidateId = null;
+  }
+
+  async endWidgetDrag(point: Electron.Point): Promise<void> {
+    if (!this.widgetDragState) {
+      return;
+    }
+
+    this.updateWidgetDrag(point);
+    this.widgetDragState = null;
+
+    const window = this.widgetWindow;
+    if (!window || window.isDestroyed()) {
+      return;
+    }
+
+    const anchor = this.getWidgetAnchor(window.getBounds());
+    const display = screen.getDisplayNearestPoint(anchor);
+    const position: WidgetPosition = {
+      xRatio: Math.min(
+        1,
+        Math.max(0, (anchor.x - display.workArea.x) / display.workArea.width),
+      ),
+      yRatio: Math.min(
+        1,
+        Math.max(0, (anchor.y - display.workArea.y) / display.workArea.height),
+      ),
+    };
+    this.widgetPosition = position;
+
+    try {
+      const uiSettings = await this.settingsService.getUISettings();
+      await this.settingsService.updateSettings({
+        ui: { ...uiSettings, widgetPosition: position },
+      });
+      logger.main.info("Saved floating widget position", {
+        displayId: display.id,
+        position,
+      });
+    } catch (error) {
+      logger.main.warn("Failed to save floating widget position", { error });
+    }
+  }
+
   setWidgetIgnoreMouseEvents(ignore: boolean): void {
     if (!this.widgetWindow || this.widgetWindow.isDestroyed()) {
       return;
     }
 
-    this.widgetWindow.setIgnoreMouseEvents(ignore, { forward: true });
+    if (process.platform === "linux") {
+      // The Linux build runs through XWayland because the widget needs native
+      // positioning. Use the X11 input shape for the idle state: the visible
+      // pill receives clicks directly, while the rest of this large,
+      // transparent window falls through to applications behind it. This is
+      // independent of cursor coordinate scaling, unlike hover polling.
+      const bounds = this.widgetWindow.getBounds();
+      const shape = ignore
+        ? [this.getLinuxIdleWidgetShape(bounds)]
+        : [{ x: 0, y: 0, width: bounds.width, height: bounds.height }];
+      this.widgetWindow.setShape(shape);
+      this.widgetWindow.setIgnoreMouseEvents(false);
+    } else {
+      this.widgetWindow.setIgnoreMouseEvents(ignore, { forward: true });
+    }
+  }
+
+  private getLinuxIdleWidgetShape(
+    bounds: Electron.Rectangle,
+  ): Electron.Rectangle {
+    const horizontalPadding = 8;
+    const verticalPadding = 6;
+
+    return {
+      x:
+        Math.round((bounds.width - WindowManager.WIDGET_IDLE_WIDTH) / 2) -
+        horizontalPadding,
+      y:
+        bounds.height -
+        WindowManager.WIDGET_BOTTOM_MARGIN -
+        WindowManager.WIDGET_IDLE_HEIGHT -
+        verticalPadding,
+      width: WindowManager.WIDGET_IDLE_WIDTH + horizontalPadding * 2,
+      height:
+        WindowManager.WIDGET_IDLE_HEIGHT +
+        WindowManager.WIDGET_BOTTOM_MARGIN +
+        verticalPadding,
+    };
   }
 
   isNotesWindowVisible(): boolean {
@@ -799,11 +1060,13 @@ export class WindowManager extends EventEmitter {
 
   cleanup(): void {
     this.notesWindowController.cleanup();
+    this.widgetDragState = null;
 
     // Stop cursor polling
     if (this.cursorPollingInterval) {
       clearInterval(this.cursorPollingInterval);
       this.cursorPollingInterval = null;
+      this.cursorDisplayCandidateId = null;
       logger.main.info("Stopped cursor polling");
     }
 
