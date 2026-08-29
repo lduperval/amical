@@ -164,13 +164,22 @@ export class AuthService extends EventEmitter {
     super();
 
     this.config = {
-      clientId: process.env.AUTH_CLIENT_ID || __BUNDLED_AUTH_CLIENT_ID,
+      clientId:
+        process.env.AUTH_CLIENT_ID ||
+        __BUNDLED_AUTH_CLIENT_ID ||
+        "amical-desktop",
       authorizationEndpoint:
         process.env.AUTHORIZATION_ENDPOINT ||
-        __BUNDLED_AUTH_AUTHORIZATION_ENDPOINT,
+        __BUNDLED_AUTH_AUTHORIZATION_ENDPOINT ||
+        "https://core.amical.ai/api/auth/oauth2/authorize",
       tokenEndpoint:
-        process.env.AUTH_TOKEN_ENDPOINT || __BUNDLED_AUTH_TOKEN_ENDPOINT,
-      redirectUri: process.env.AUTH_REDIRECT_URI || __BUNDLED_AUTH_REDIRECT_URI,
+        process.env.AUTH_TOKEN_ENDPOINT ||
+        __BUNDLED_AUTH_TOKEN_ENDPOINT ||
+        "https://core.amical.ai/api/auth/oauth2/token",
+      redirectUri:
+        process.env.AUTH_REDIRECT_URI ||
+        __BUNDLED_AUTH_REDIRECT_URI ||
+        "amical://oauth/callback",
     };
 
     logger.main.info("AuthService initialized with config:", {

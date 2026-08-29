@@ -258,6 +258,9 @@ export const onboardingRouter = createRouter({
    */
   checkMicrophonePermission: procedure.query(async (): Promise<string> => {
     try {
+      if (typeof systemPreferences.getMediaAccessStatus !== "function") {
+        return "granted"; // Linux fallback
+      }
       const status = systemPreferences.getMediaAccessStatus("microphone");
       logger.main.debug("Microphone permission status:", status);
       return status;
@@ -300,6 +303,9 @@ export const onboardingRouter = createRouter({
   requestMicrophonePermission: procedure.mutation(
     async (): Promise<boolean> => {
       try {
+        if (typeof systemPreferences.askForMediaAccess !== "function") {
+          return true; // Linux fallback
+        }
         const status = await systemPreferences.askForMediaAccess("microphone");
         logger.main.info("Microphone permission requested, status:", status);
         return status;

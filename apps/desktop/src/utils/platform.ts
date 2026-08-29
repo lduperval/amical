@@ -34,14 +34,18 @@ export function isLinux(): boolean {
  * Get the native helper name for the current platform
  */
 export function getNativeHelperName(): string {
-  return isWindows() ? "WindowsHelper.exe" : "SwiftHelper";
+  if (isWindows()) return "WindowsHelper.exe";
+  if (isLinux()) return "linux-helper";
+  return "SwiftHelper";
 }
 
 /**
  * Get the native helper directory name for the current platform
  */
 export function getNativeHelperDir(): string {
-  return isWindows() ? "windows-helper" : "swift-helper";
+  if (isWindows()) return "windows-helper";
+  if (isLinux()) return "linux-helper";
+  return "swift-helper";
 }
 
 /**
