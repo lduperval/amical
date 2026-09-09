@@ -1279,6 +1279,7 @@ dependencies = [
  "async-process",
  "async-recursion",
  "async-trait",
+ "blocking",
  "enumflags2",
  "event-listener",
  "futures-core",
