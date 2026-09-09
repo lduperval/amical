@@ -17,6 +17,7 @@ import {
   rmdirSync,
   statSync,
   existsSync,
+  readFileSync,
   mkdirSync,
   cpSync,
   rmSync,
@@ -54,6 +55,62 @@ export const EXTERNAL_DEPENDENCIES = [
   "@amical/whisper-wrapper",
   // Add any other native modules you need here
 ];
+
+function getLinuxMakers() {
+  const debMaker = new MakerDeb({
+    options: {
+      bin: "Amical",
+      mimeType: ["x-scheme-handler/amical"],
+    },
+  });
+  const rpmMaker = new MakerRpm({ options: { bin: "Amical" } });
+
+  const explicitFormat = process.env.AMICAL_LINUX_FORMAT?.toLowerCase();
+  if (explicitFormat === "all") {
+    return [debMaker, rpmMaker];
+  }
+  if (
+    explicitFormat === "rpm" ||
+    process.argv.some((a) => a.includes("maker-rpm"))
+  ) {
+    return [rpmMaker];
+  }
+  if (
+    explicitFormat === "deb" ||
+    process.argv.some((a) => a.includes("maker-deb"))
+  ) {
+    return [debMaker];
+  }
+
+  // Auto-detect packaging format based on the host distribution
+  let detectedFormat: "deb" | "rpm" = "deb";
+  try {
+    if (existsSync("/etc/os-release")) {
+      const osRelease = readFileSync("/etc/os-release", "utf8");
+      if (
+        /(^|\n)ID_LIKE=.*(rhel|fedora|suse)/i.test(osRelease) ||
+        /(^|\n)ID=(fedora|rhel|centos|rocky|almalinux|opensuse|sles)/i.test(
+          osRelease,
+        )
+      ) {
+        detectedFormat = "rpm";
+      } else if (
+        /(^|\n)ID_LIKE=.*debian/i.test(osRelease) ||
+        /(^|\n)ID=(debian|ubuntu|mint|pop)/i.test(osRelease)
+      ) {
+        detectedFormat = "deb";
+      }
+    }
+  } catch {
+    if (existsSync("/usr/bin/dpkg") || existsSync("/usr/bin/dpkg-deb")) {
+      detectedFormat = "deb";
+    } else if (existsSync("/usr/bin/rpmbuild") || existsSync("/usr/bin/rpm")) {
+      detectedFormat = "rpm";
+    }
+  }
+
+  return detectedFormat === "rpm" ? [rpmMaker] : [debMaker];
+}
 
 const config: ForgeConfig = {
   hooks: {
@@ -883,13 +940,7 @@ const config: ForgeConfig = {
       },
       ["darwin"],
     ),
-    new MakerRpm({ options: { bin: "Amical" } }),
-    new MakerDeb({
-      options: {
-        bin: "Amical",
-        mimeType: ["x-scheme-handler/amical"],
-      },
-    }),
+    ...getLinuxMakers(),
   ],
   plugins: [
     new VitePlugin({

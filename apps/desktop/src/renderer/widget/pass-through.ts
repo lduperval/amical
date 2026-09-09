@@ -7,7 +7,7 @@ import { trpcClient } from "@/trpc/react";
 // renderer error fallback. Each only reports its own reason and we derive
 // ignore from the union: the window stays interactive while ANY reason is
 // active, and only goes click-through once they're all gone.
-export type PassThroughReason = "toast" | "hover" | "draft" | "error";
+export type PassThroughReason = "toast" | "hover" | "draft" | "error" | "drag";
 
 const activeReasons = new Set<PassThroughReason>();
 
@@ -29,4 +29,3 @@ export const setPassThroughReason = (
       console.error("Failed to set widget mouse pass-through", error);
     });
 };
-

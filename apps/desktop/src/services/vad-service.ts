@@ -118,9 +118,12 @@ export class VADService extends EventEmitter {
         );
       }
 
+      const executionProviders =
+        process.platform === "darwin" ? ["coreml", "cpu"] : ["cpu"];
+
       // Load ONNX model
       this.session = await this.ort.InferenceSession.create(this.modelPath, {
-        executionProviders: ["coreml", "cpu"],
+        executionProviders,
       });
 
       // Initialize hidden states (h and c)
