@@ -27,6 +27,14 @@ if (
   logger.main.info("Using XWayland for floating widget support");
 }
 
+// On Linux, hardware GPU acceleration frequently fails buffer presentation
+// over XWayland / Mesa drivers (triggering GetVSyncParametersIfAvailable errors
+// and blank windows). Software compositing ensures reliable rendering.
+if (process.platform === "linux" && !process.argv.includes("--enable-gpu")) {
+  app.disableHardwareAcceleration();
+  logger.main.info("Disabled GPU acceleration on Linux");
+}
+
 // Drop expired certs before they become trust anchors (see the merge below).
 function notExpired(pem: string): boolean {
   try {
