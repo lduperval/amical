@@ -4,7 +4,7 @@
   "description": "Rust native helper for Wayland integration on Linux",
   "private": true,
   "scripts": {
-    "build": "turbo run build:native",
+    "build": "pnpm build:native",
     "build:native": "cargo build --release && mkdir -p bin && cp target/release/linux-helper bin/linux-helper",
     "clean": "rm -rf target bin .turbo",
     "dev": "cargo build && mkdir -p bin && cp target/debug/linux-helper bin/linux-helper"

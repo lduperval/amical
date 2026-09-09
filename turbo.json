@@ -13,6 +13,9 @@
     "AMICAL_E2E_PACKAGE"
   ],
   "tasks": {
+    "clean": {
+      "cache": false
+    },
     "build": {
       "dependsOn": ["^build"],
       "inputs": ["$TURBO_DEFAULT$", ".env*"],
@@ -51,9 +54,15 @@
         "scripts/**",
         "src/binding/**",
         "binding.gyp",
-        "whisper.cpp/**"
+        "whisper.cpp/**",
+        "src/**",
+        "Cargo.toml",
+        "Cargo.lock"
       ],
       "outputs": ["bin/**", "build/**"],
+      "cache": true
+    },
+    "generate:all": {
       "cache": true
     },
     "format:check": {},

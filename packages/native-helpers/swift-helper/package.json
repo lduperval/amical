@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "build": "pnpm --filter @amical/types generate:all && turbo run build:native",
-    "build:native": "mkdir -p .build && swift build --configuration release && mkdir -p bin && cp .build/release/SwiftHelper bin/SwiftHelper",
+    "build:native": "node -e \"if (process.platform === 'darwin') { const { execSync } = require('child_process'); execSync('mkdir -p .build && swift build --configuration release && mkdir -p bin && cp .build/release/SwiftHelper bin/SwiftHelper', { stdio: 'inherit' }); } else { console.log('Skipping Swift helper build on non-macOS platform'); }\"",
     "clean": "rm -rf .build bin .turbo",
     "dev": "pnpm --filter @amical/types generate:all && swift build --configuration debug && mkdir -p bin && cp .build/debug/SwiftHelper bin/SwiftHelper"
   },
