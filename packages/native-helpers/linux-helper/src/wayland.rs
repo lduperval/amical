@@ -198,9 +198,22 @@ fn injector_thread(
             let _ = setup_tx.send(Ok(()));
             parts
         }
-        Err(reason) => {
-            let _ = setup_tx.send(Err(reason));
-            return;
+        Err(wayland_err) => {
+            eprintln!("[wayland] zwp_virtual_keyboard_v1 unavailable ({wayland_err}), falling back to Mutter RemoteDesktop");
+            match setup_mutter() {
+                Ok(mutter_state) => {
+                    let _ = setup_tx.send(Ok(()));
+                    eprintln!("[wayland] Mutter RemoteDesktop key injection ready");
+                    run_mutter_loop(mutter_state, cmd_rx);
+                    return;
+                }
+                Err(mutter_err) => {
+                    let _ = setup_tx.send(Err(format!(
+                        "wayland error: {wayland_err}; mutter error: {mutter_err}"
+                    )));
+                    return;
+                }
+            }
         }
     };
 
@@ -228,4 +241,124 @@ fn injector_thread(
         let ok = ok && queue.roundtrip(&mut state).is_ok();
         let _ = cmd.reply.send(ok);
     }
+}
+
+struct MutterState {
+    session_proxy: zbus::blocking::Proxy<'static>,
+}
+
+fn setup_mutter() -> Result<MutterState, String> {
+    let conn = zbus::blocking::Connection::session()
+        .map_err(|e| format!("session bus unavailable: {e}"))?;
+    let proxy = zbus::blocking::Proxy::new(
+        &conn,
+        "org.gnome.Mutter.RemoteDesktop",
+        "/org/gnome/Mutter/RemoteDesktop",
+        "org.gnome.Mutter.RemoteDesktop",
+    )
+    .map_err(|e| format!("Mutter RemoteDesktop proxy failed: {e}"))?;
+
+    let session_path: zbus::zvariant::OwnedObjectPath = proxy
+        .call_method("CreateSession", &())
+        .map_err(|e| format!("CreateSession failed: {e}"))?
+        .body()
+        .deserialize()
+        .map_err(|e| format!("Failed to parse session path: {e}"))?;
+
+    let session_proxy = zbus::blocking::Proxy::new(
+        &conn,
+        "org.gnome.Mutter.RemoteDesktop",
+        session_path,
+        "org.gnome.Mutter.RemoteDesktop.Session",
+    )
+    .map_err(|e| format!("Session proxy failed: {e}"))?;
+
+    session_proxy
+        .call_method("Start", &())
+        .map_err(|e| format!("Session Start failed: {e}"))?;
+
+    Ok(MutterState { session_proxy })
+}
+
+const XKB_KEY_CONTROL_L: u32 = 0xffe3;
+const XKB_KEY_SHIFT_L: u32 = 0xffe1;
+const XKB_KEY_V: u32 = 0x0076;
+const XKB_KEY_C: u32 = 0x0063;
+const XKB_KEY_INSERT: u32 = 0xff63;
+
+fn run_mutter_loop(
+    state: MutterState,
+    cmd_rx: std_mpsc::Receiver<InjectCommand>,
+) {
+    while let Ok(cmd) = cmd_rx.recv() {
+        let ok = inject_mutter_chord(&state.session_proxy, cmd.mods, cmd.key);
+        let _ = cmd.reply.send(ok);
+    }
+}
+
+fn inject_mutter_chord(
+    proxy: &zbus::blocking::Proxy<'static>,
+    mods: u32,
+    key: u32,
+) -> bool {
+    let keysym = match key {
+        KEY_V => XKB_KEY_V,
+        KEY_C => XKB_KEY_C,
+        110 => XKB_KEY_INSERT,
+        _ => return false,
+    };
+
+    let ctrl = (mods & MOD_CTRL) != 0;
+    let shift = (mods & (1 << 0)) != 0;
+
+    if ctrl {
+        if proxy
+            .call_method("NotifyKeyboardKeysym", &(XKB_KEY_CONTROL_L, true))
+            .is_err()
+        {
+            return false;
+        }
+        std::thread::sleep(STEP_DELAY);
+    }
+
+    if shift {
+        if proxy
+            .call_method("NotifyKeyboardKeysym", &(XKB_KEY_SHIFT_L, true))
+            .is_err()
+        {
+            if ctrl {
+                let _ = proxy.call_method("NotifyKeyboardKeysym", &(XKB_KEY_CONTROL_L, false));
+            }
+            return false;
+        }
+        std::thread::sleep(STEP_DELAY);
+    }
+
+    if proxy
+        .call_method("NotifyKeyboardKeysym", &(keysym, true))
+        .is_err()
+    {
+        if shift {
+            let _ = proxy.call_method("NotifyKeyboardKeysym", &(XKB_KEY_SHIFT_L, false));
+        }
+        if ctrl {
+            let _ = proxy.call_method("NotifyKeyboardKeysym", &(XKB_KEY_CONTROL_L, false));
+        }
+        return false;
+    }
+    std::thread::sleep(STEP_DELAY);
+
+    let _ = proxy.call_method("NotifyKeyboardKeysym", &(keysym, false));
+    std::thread::sleep(STEP_DELAY);
+
+    if shift {
+        let _ = proxy.call_method("NotifyKeyboardKeysym", &(XKB_KEY_SHIFT_L, false));
+        std::thread::sleep(STEP_DELAY);
+    }
+
+    if ctrl {
+        let _ = proxy.call_method("NotifyKeyboardKeysym", &(XKB_KEY_CONTROL_L, false));
+    }
+
+    true
 }
