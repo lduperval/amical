@@ -33,6 +33,7 @@ use crate::rpc::{HelperEvent, KeyEventPayload, SetShortcutsParams};
 const PORTAL_DEST: &str = "org.freedesktop.portal.Desktop";
 const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
 const GLOBAL_SHORTCUTS_IFACE: &str = "org.freedesktop.portal.GlobalShortcuts";
+const REGISTRY_IFACE: &str = "org.freedesktop.host.portal.Registry";
 const REQUEST_IFACE: &str = "org.freedesktop.portal.Request";
 const SESSION_IFACE: &str = "org.freedesktop.portal.Session";
 
@@ -76,6 +77,9 @@ impl ShortcutsService {
             .trim_start_matches(':')
             .replace('.', "_");
 
+        Self::ensure_desktop_file();
+        Self::register_app_id(&conn).await;
+
         let service = Arc::new(Self {
             conn,
             sender_token,
@@ -92,6 +96,70 @@ impl ShortcutsService {
         service.clone().spawn_signal_listener("Deactivated").await?;
 
         Ok(service)
+    }
+
+    /// In development environments where the .deb package is not installed,
+    /// xdg-desktop-portal still requires a corresponding .desktop file to register
+    /// an application ID. Create one in ~/.local/share/applications if missing.
+    fn ensure_desktop_file() {
+        let system_path = std::path::Path::new("/usr/share/applications/amical-desktop.desktop");
+        let alt_system_path =
+            std::path::Path::new("/usr/local/share/applications/amical-desktop.desktop");
+        let Ok(home) = std::env::var("HOME") else {
+            return;
+        };
+        let user_apps_dir = std::path::PathBuf::from(format!("{home}/.local/share/applications"));
+        let user_path = user_apps_dir.join("amical-desktop.desktop");
+
+        if system_path.exists() || alt_system_path.exists() || user_path.exists() {
+            return;
+        }
+
+        if let Ok(_) = std::fs::create_dir_all(&user_apps_dir) {
+            let desktop_content = "[Desktop Entry]\n\
+Name=Amical\n\
+Comment=Amical Desktop app\n\
+Exec=amical-desktop %U\n\
+Type=Application\n\
+Categories=Utility;\n";
+            let _ = std::fs::write(user_path, desktop_content);
+        }
+    }
+
+    /// xdg-desktop-portal 1.20+ requires unconfined host applications to declare
+    /// their identity via org.freedesktop.host.portal.Registry.Register before
+    /// creating global shortcut sessions.
+    async fn register_app_id(conn: &Connection) {
+        let Ok(proxy) = Proxy::new(
+            conn,
+            PORTAL_DEST,
+            PORTAL_PATH,
+            REGISTRY_IFACE,
+        )
+        .await
+        else {
+            return;
+        };
+
+        let empty_options: HashMap<&str, Value> = HashMap::new();
+        let candidates = ["amical-desktop", "ai.amical.desktop", "amical"];
+
+        for app_id in candidates {
+            match proxy.call_method("Register", &(app_id, &empty_options)).await {
+                Ok(_) => {
+                    eprintln!("[shortcuts] successfully registered app_id: {app_id}");
+                    break;
+                }
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if err_str.contains("Connection already associated") {
+                        eprintln!("[shortcuts] connection already registered with an app_id");
+                        break;
+                    }
+                    eprintln!("[shortcuts] register app_id '{app_id}' attempt: {err_str}");
+                }
+            }
+        }
     }
 
     async fn portal_proxy(&self) -> Result<Proxy<'static>, String> {
@@ -287,6 +355,9 @@ impl ShortcutsService {
         }
 
         let proxy = self.portal_proxy().await?;
+
+        // Ensure app ID is registered with portal before session creation
+        Self::register_app_id(&self.conn).await;
 
         // --- CreateSession ---------------------------------------------------
         let handle_token = self.next_token();
