@@ -20,7 +20,7 @@ tokio = { version = "1", features = [
 ] }
 
 # DBus (xdg-desktop-portal GlobalShortcuts)
-zbus = { version = "4", default-features = false, features = ["tokio", "blocking"] }
+zbus = { version = "4", default-features = false, features = ["tokio"] }
 
 # Wayland (clipboard via data-control, key injection via virtual-keyboard)
 wayland-client = "0.31"
