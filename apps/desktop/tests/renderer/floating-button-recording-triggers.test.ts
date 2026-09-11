@@ -131,37 +131,41 @@ describe("FloatingButton recording triggers", () => {
     ]);
   });
 
-  it.each([
-    {
-      state: "recording",
-      button: "Dismiss recording",
-      expected: "dismiss",
-    },
-    {
-      state: "starting",
-      button: "Dismiss recording",
-      expected: "dismiss",
-    },
-    {
-      state: "recording",
-      button: "Stop recording and transcribe",
-      expected: "stop",
-    },
-    {
-      state: "starting",
-      button: "Stop recording and transcribe",
-      expected: "stop",
-    },
-  ] as const)(
-    "I-51 routes $button while $state",
-    ({ state, button, expected }) => {
+  it.each(
+    [
+      {
+        state: "recording",
+        button: "Dismiss recording",
+        expected: "dismiss",
+      },
+      {
+        state: "starting",
+        button: "Dismiss recording",
+        expected: "dismiss",
+      },
+      {
+        state: "recording",
+        button: "Stop recording and transcribe",
+        expected: "stop",
+      },
+      {
+        state: "starting",
+        button: "Stop recording and transcribe",
+        expected: "stop",
+      },
+    ].flatMap((test) =>
+      (["ptt", "hands-free"] as const).map((mode) => ({ ...test, mode })),
+    ),
+  )(
+    "routes $button while $state in $mode mode",
+    ({ state, button, expected, mode }) => {
       const startRecording = vi.fn().mockResolvedValue(undefined);
       const stopRecording = vi.fn().mockResolvedValue(undefined);
       const dismissRecording = vi.fn().mockResolvedValue(undefined);
       const recordingStatus: RecordingStatus = {
         sessionId: "session-1",
-        state,
-        mode: "hands-free",
+        state: state as "starting" | "recording",
+        mode,
         isDraft: false,
         stopKind: "none",
         stopOrigin: "none",

@@ -1,6 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 let appModuleLoaded = false;
+let accelerationDisabledAtAppImport = false;
 
 // vi.mock factories are cached in the mock registry and survive
 // vi.resetModules(), so per-test behavior (squirrel flag, app-module failure)
@@ -10,7 +11,10 @@ async function importEntry(opts: { started?: boolean; appError?: Error } = {}) {
   vi.doMock("electron-squirrel-startup", () => ({
     default: opts.started ?? false,
   }));
-  vi.doMock("@/main/app", () => {
+  vi.doMock("@/main/app", async () => {
+    const { app } = await import("electron");
+    accelerationDisabledAtAppImport =
+      vi.mocked(app.disableHardwareAcceleration).mock.calls.length > 0;
     if (opts.appError) throw opts.appError;
     appModuleLoaded = true;
     return {};
@@ -30,6 +34,51 @@ describe("main entry", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     appModuleLoaded = false;
+    accelerationDisabledAtAppImport = false;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it("configures Linux software rendering before loading the app module", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+    vi.spyOn(process, "argv", "get").mockReturnValue(["amical"]);
+    vi.stubEnv("XDG_SESSION_TYPE", "wayland");
+    const { app } = await importEntry();
+
+    expect(accelerationDisabledAtAppImport).toBe(true);
+    expect(app.disableHardwareAcceleration).toHaveBeenCalledOnce();
+    expect(app.commandLine.appendSwitch).toHaveBeenCalledWith(
+      "ozone-platform",
+      "x11",
+    );
+    expect(app.commandLine.appendSwitch).toHaveBeenCalledWith(
+      "disable-gpu-compositing",
+    );
+  });
+
+  it("preserves explicit GPU and Ozone overrides", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+    vi.spyOn(process, "argv", "get").mockReturnValue([
+      "amical",
+      "--enable-gpu",
+      "--ozone-platform=wayland",
+    ]);
+    vi.stubEnv("XDG_SESSION_TYPE", "wayland");
+    const { app } = await importEntry();
+
+    expect(app.disableHardwareAcceleration).not.toHaveBeenCalled();
+    expect(app.commandLine.appendSwitch).not.toHaveBeenCalled();
+  });
+
+  it("leaves rendering unchanged outside Linux", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
+    const { app } = await importEntry();
+
+    expect(app.disableHardwareAcceleration).not.toHaveBeenCalled();
+    expect(app.commandLine.appendSwitch).not.toHaveBeenCalled();
   });
 
   it("loads the app module", async () => {

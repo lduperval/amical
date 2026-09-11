@@ -209,7 +209,10 @@ const testAppPath = process.cwd();
 const mockApp = {
   commandLine: {
     appendSwitch: vi.fn(),
+    getSwitchValue: vi.fn(() => ""),
+    hasSwitch: vi.fn(() => false),
   },
+  disableHardwareAcceleration: vi.fn(),
   getPath: vi.fn((name: string) => {
     const paths: Record<string, string> = {
       userData: testUserDataPath,
@@ -421,6 +424,13 @@ const mockNet = {
   fetch: vi.fn(),
 };
 
+const mockNotification = Object.assign(
+  vi.fn(function () {
+    return { show: vi.fn() };
+  }),
+  { isSupported: vi.fn(() => true) },
+);
+
 export function createElectronMocks() {
   return {
     app: mockApp,
@@ -438,6 +448,7 @@ export function createElectronMocks() {
     nativeImage: mockNativeImage,
     autoUpdater: mockAutoUpdater as any,
     net: mockNet as any,
+    Notification: mockNotification,
   };
 }
 

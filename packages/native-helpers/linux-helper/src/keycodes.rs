@@ -137,8 +137,8 @@ pub fn display_name(keycode: u32) -> String {
 pub fn xkb_keysym_name(keycode: u32) -> Option<String> {
     let name = match keycode {
         // Letters: keysym is the lowercase letter.
-        0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 31 | 32
-        | 34 | 35 | 37 | 38 | 40 | 45 | 46 => display_name(keycode).to_lowercase(),
+        0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 31 | 32 | 34
+        | 35 | 37 | 38 | 40 | 45 | 46 => display_name(keycode).to_lowercase(),
         // Digits.
         18 | 19 | 20 | 21 | 22 | 23 | 25 | 26 | 28 | 29 => display_name(keycode),
         48 => "Tab".into(),

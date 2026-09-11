@@ -1,10 +1,48 @@
 import { defineConfig, loadEnv } from "vite";
 import { resolve } from "path";
+import { execSync } from "node:child_process";
 import { posthogSourceMapPlugins } from "./vite.posthog";
+
+function getSelectedInputMethod(): string | undefined {
+  const argv = process.argv;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--input-method" && i + 1 < argv.length) {
+      return argv[i + 1];
+    }
+    if (argv[i].startsWith("--input-method=")) {
+      return argv[i].split("=")[1];
+    }
+  }
+  return process.env.AMICAL_INPUT_METHOD;
+}
 
 // https://vitejs.dev/config
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
+
+  // When building on Linux with a non-default input method, rebuild linux-helper with the requested feature
+  if (process.platform === "linux") {
+    const inputMethod = getSelectedInputMethod();
+    const cargoFeatures: string[] = [];
+    if (inputMethod && inputMethod !== "clipboard") {
+      cargoFeatures.push(inputMethod);
+    }
+    if (cargoFeatures.length > 0) {
+      const featureArg = `--features ${cargoFeatures.join(",")}`;
+      const helperDir = resolve(
+        __dirname,
+        "../../packages/native-helpers/linux-helper",
+      );
+      const isRelease = mode === "production";
+      const releaseFlag = isRelease ? "--release" : "";
+      const targetSubdir = isRelease ? "release" : "debug";
+      console.log(`[vite.main] Rebuilding linux-helper with ${featureArg}...`);
+      execSync(
+        `cargo build ${releaseFlag} ${featureArg} && mkdir -p bin && cp target/${targetSubdir}/linux-helper bin/linux-helper`,
+        { cwd: helperDir, stdio: "inherit" },
+      );
+    }
+  }
 
   return {
     plugins: posthogSourceMapPlugins(),

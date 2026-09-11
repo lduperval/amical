@@ -4,7 +4,7 @@ import {
   flushAllDictationTraces,
   recordPhase,
 } from "../telemetry/dictation-trace";
-import { ipcMain, app } from "electron";
+import { ipcMain, app, Notification } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Deferred, Effect, Layer } from "effect";
@@ -237,6 +237,16 @@ export function createDesktopRecordingLifecycle(deps: {
               transcript: options.transcript,
               preserveClipboard: options.preserveClipboard,
             });
+            if (process.platform === "linux" && result?.success === false) {
+              const message = result.message || "Automatic paste failed.";
+              logger.main.warn("Linux automatic paste failed", { message });
+              if (Notification.isSupported()) {
+                new Notification({
+                  title: "Amical could not paste automatically",
+                  body: message,
+                }).show();
+              }
+            }
             return { success: !!result?.success };
           },
           setDraftEnterCapture: async (armed) => {

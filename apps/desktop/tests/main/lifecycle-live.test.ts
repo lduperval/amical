@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { Notification } from "electron";
 import type { GetAccessibilityContextResult } from "@amical/types";
 
 const db = vi.hoisted(() => ({
@@ -56,6 +57,7 @@ function makeLive(options?: {
     clipboardChanged: boolean;
   }>;
   draftChord?: boolean;
+  pasteResult?: { success: boolean; message?: string };
 }) {
   const nativeCalls: Array<{ method: string; params: unknown }> = [];
   const chunks: Array<{ session: string; final: boolean }> = [];
@@ -65,6 +67,9 @@ function makeLive(options?: {
   const nativeBridge = {
     call: vi.fn(async (method: string, params: unknown) => {
       nativeCalls.push({ method, params });
+      if (method === "pasteText" && options?.pasteResult) {
+        return options.pasteResult;
+      }
       if (method === "startRecording") {
         return options?.startRecording
           ? await options.startRecording()
@@ -170,6 +175,27 @@ function makeLive(options?: {
 }
 
 describe("desktop live binding", () => {
+  it("shows the Linux clipboard fallback message after unsuccessful paste", async () => {
+    const platform = vi
+      .spyOn(process, "platform", "get")
+      .mockReturnValue("linux");
+    const message = "Your transcript is on the clipboard; paste it manually.";
+    try {
+      const h = makeLive({ pasteResult: { success: false, message } });
+      const session = await h.startToRecording();
+      await h.finishSession(session);
+      expect(h.nativeCalls.some((call) => call.method === "pasteText")).toBe(
+        true,
+      );
+      expect(Notification).toHaveBeenCalledWith({
+        title: "Amical could not paste automatically",
+        body: message,
+      });
+    } finally {
+      platform.mockRestore();
+    }
+  });
+
   it("a rejected preferences read still releases the beep gate", async () => {
     const h = makeLive({
       preferences: async () => {

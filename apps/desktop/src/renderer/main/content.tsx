@@ -6,6 +6,7 @@ import {
   defaultParseSearch,
 } from "@tanstack/react-router";
 import { routeTree } from "./routeTree.gen";
+import { LoadingScreen } from "./components/loading-screen";
 
 const hashHistory = createHashHistory();
 
@@ -14,6 +15,8 @@ const router = createRouter({
   routeTree,
   defaultPreload: "intent",
   history: hashHistory,
+  defaultPendingComponent: LoadingScreen,
+  defaultPendingMs: 0,
 });
 
 // Register the router instance for type safety

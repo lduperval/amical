@@ -10,29 +10,75 @@ import { showFatalStartupDialog } from "./fatal-startup-dialog";
 import { AppManager } from "./core/app-manager";
 import { isWindows } from "../utils/platform";
 import { ServiceManager } from "./managers/service-manager";
-import { shouldUseXWaylandForFloatingWidget } from "../utils/linux-windowing";
 
-// Electron 38 defaults to native Wayland, where positioned/topmost inactive
-// utility windows are unsupported. Select XWayland before app readiness so the
-// floating recording widget can be placed and shown reliably. This does not
-// affect the DBus Global Shortcuts portal used on GNOME 48+.
-if (
-  shouldUseXWaylandForFloatingWidget({
-    platform: process.platform,
-    sessionType: process.env.XDG_SESSION_TYPE,
-    argv: process.argv,
-  })
-) {
-  app.commandLine.appendSwitch("ozone-platform", "x11");
-  logger.main.info("Using XWayland for floating widget support");
+// The rendering workaround runs synchronously in main.ts. Log the requested
+// mode here, once the logger is available, plus Chromium's actual feature
+// status when it reports GPU information (also covers software rendering).
+if (process.platform === "linux") {
+  logger.main.info("Linux rendering configured in early startup", {
+    softwareRendering: !process.argv.includes("--enable-gpu"),
+    ozonePlatform: app.commandLine.getSwitchValue("ozone-platform"),
+    gpuCompositingDisabled: app.commandLine.hasSwitch(
+      "disable-gpu-compositing",
+    ),
+  });
+  app.on("gpu-info-update", () => {
+    logger.main.info("Linux GPU feature status", app.getGPUFeatureStatus());
+  });
 }
 
-// On Linux, hardware GPU acceleration frequently fails buffer presentation
-// over XWayland / Mesa drivers (triggering GetVSyncParametersIfAvailable errors
-// and blank windows). Software compositing ensures reliable rendering.
-if (process.platform === "linux" && !process.argv.includes("--enable-gpu")) {
-  app.disableHardwareAcceleration();
-  logger.main.info("Disabled GPU acceleration on Linux");
+// Parse --input-method CLI flag for Linux input method selection
+const VALID_INPUT_METHODS = [
+  "clipboard",
+  "uinput",
+  "xtest",
+  "gnome_ext",
+] as const;
+type InputMethod = (typeof VALID_INPUT_METHODS)[number];
+
+let selectedInputMethod: InputMethod | undefined;
+
+for (let i = 0; i < process.argv.length; i++) {
+  const arg = process.argv[i];
+  if (arg === "--input-method" && i + 1 < process.argv.length) {
+    const val = process.argv[i + 1];
+    if (VALID_INPUT_METHODS.includes(val as InputMethod)) {
+      selectedInputMethod = val as InputMethod;
+    } else {
+      logger.main.warn(
+        `Invalid --input-method '${val}'. Valid options are: ${VALID_INPUT_METHODS.join(", ")}. Falling back to default 'clipboard'.`,
+      );
+      selectedInputMethod = "clipboard";
+    }
+    i++;
+  } else if (arg.startsWith("--input-method=")) {
+    const val = arg.split("=")[1];
+    if (VALID_INPUT_METHODS.includes(val as InputMethod)) {
+      selectedInputMethod = val as InputMethod;
+    } else {
+      logger.main.warn(
+        `Invalid --input-method '${val}'. Valid options are: ${VALID_INPUT_METHODS.join(", ")}. Falling back to default 'clipboard'.`,
+      );
+      selectedInputMethod = "clipboard";
+    }
+  }
+}
+
+if (!selectedInputMethod && process.env.AMICAL_INPUT_METHOD) {
+  const envVal = process.env.AMICAL_INPUT_METHOD;
+  if (VALID_INPUT_METHODS.includes(envVal as InputMethod)) {
+    selectedInputMethod = envVal as InputMethod;
+  } else {
+    logger.main.warn(
+      `Invalid AMICAL_INPUT_METHOD '${envVal}'. Valid options are: ${VALID_INPUT_METHODS.join(", ")}. Falling back to default 'clipboard'.`,
+    );
+    selectedInputMethod = "clipboard";
+  }
+}
+
+if (selectedInputMethod) {
+  process.env.AMICAL_INPUT_METHOD = selectedInputMethod;
+  logger.main.info(`Configured input method: ${selectedInputMethod}`);
 }
 
 // Drop expired certs before they become trust anchors (see the merge below).

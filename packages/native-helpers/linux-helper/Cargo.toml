@@ -31,7 +31,15 @@ wl-clipboard-rs = "0.9"
 time = { version = "0.3", features = ["formatting"] }
 tempfile = "3"
 futures-util = { version = "0.3", default-features = false }
+evdev = { version = "0.13.2", optional = true }
 
 [profile.release]
 lto = true
 strip = true
+
+[features]
+default = []
+# Optional features to enable alternative input methods
+uinput = ["dep:evdev"] # `/dev/uinput` implementation (Option A)
+xtest = []           # X11/XTest fallback (Option B)
+gnome_ext = []       # GNOME Shell extension (Option C)

@@ -47,7 +47,9 @@ impl AudioService {
     }
 
     fn unpack_sounds() -> std::io::Result<tempfile::TempDir> {
-        let dir = tempfile::Builder::new().prefix("amical-helper-").tempdir()?;
+        let dir = tempfile::Builder::new()
+            .prefix("amical-helper-")
+            .tempdir()?;
         std::fs::write(dir.path().join("rec-start.wav"), REC_START_WAV)?;
         std::fs::write(dir.path().join("rec-stop.wav"), REC_STOP_WAV)?;
         Ok(dir)

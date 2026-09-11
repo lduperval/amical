@@ -74,12 +74,8 @@ impl Dispatch<wl_registry::WlRegistry, ()> for RegistryState {
                         Some(registry.bind::<wl_seat::WlSeat, _, _>(name, version.min(5), qh, ()));
                 }
                 "zwp_virtual_keyboard_manager_v1" => {
-                    state.manager = Some(registry.bind::<ZwpVirtualKeyboardManagerV1, _, _>(
-                        name,
-                        1,
-                        qh,
-                        (),
-                    ));
+                    state.manager =
+                        Some(registry.bind::<ZwpVirtualKeyboardManagerV1, _, _>(name, 1, qh, ()));
                 }
                 _ => {}
             }
