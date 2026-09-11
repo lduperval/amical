@@ -1,12 +1,7 @@
 import * as React from "react";
 import { useNavigate } from "@tanstack/react-router";
-import {
-  ArrowRight,
-  ExternalLink,
-  icons,
-  type LucideIcon,
-  X,
-} from "lucide-react";
+import { ArrowRight, ExternalLink, X } from "lucide-react";
+import { RemoteConfigGlyph } from "./remote-config-glyph";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -32,18 +27,6 @@ import {
   readDismissedUntil,
   recordDismissal,
 } from "@/utils/remote-config-dismissals";
-
-// Resolve a kebab-case lucide name (any of the ~1700 icons) to its component;
-// undefined if the name isn't a real icon. Custom art comes through `iconUrl`
-// instead and is rendered as an <img>.
-function lucideGlyph(name: string): LucideIcon | undefined {
-  const pascal = name
-    .split("-")
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join("");
-  return (icons as Record<string, LucideIcon | undefined>)[pascal];
-}
 
 // Tone → accent classes. The payload carries only the semantic tone; all colour
 // lives here (via the brand/info/warn/success tokens in globals.css). `solid` =
@@ -219,13 +202,13 @@ function SurfaceIcon({
       />
     );
   } else {
-    // Unknown name → the tone's default glyph → Sparkles (the tone defaults are
-    // always real lucide icons, so the final fallback never actually fires).
-    const Glyph =
-      lucideGlyph(icon.name) ??
-      lucideGlyph(TONE_DEFAULT_ICON[tone]) ??
-      icons.Sparkles;
-    glyph = <Glyph className={glyphClassName} />;
+    glyph = (
+      <RemoteConfigGlyph
+        name={icon.name}
+        fallbackName={TONE_DEFAULT_ICON[tone]}
+        className={glyphClassName}
+      />
+    );
   }
 
   return (
