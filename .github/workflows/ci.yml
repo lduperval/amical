@@ -56,6 +56,34 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: pnpm --filter @amical/desktop verify:lifecycle-contract-version "$BASE_SHA"
 
+  test_linux_helper:
+    name: Test Linux Helper (${{ matrix.feature != '' && matrix.feature || 'default' }})
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        feature: ["", "uinput", "xtest", "gnome_ext"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Setup Rust
+        run: rustup update stable && rustup default stable
+
+      - name: Test Linux Helper
+        working-directory: packages/native-helpers/linux-helper
+        run: |
+          if [ -z "${{ matrix.feature }}" ]; then
+            cargo test
+          else
+            cargo test --features ${{ matrix.feature }}
+          fi
+
   build_desktop:
     name: Build Desktop (${{ matrix.os }} ${{ matrix.arch }})
     needs: typecheck
