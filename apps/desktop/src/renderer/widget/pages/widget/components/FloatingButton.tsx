@@ -115,7 +115,6 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
   const isStopping =
     recordingStatus.state === "stopping" &&
     recordingStatus.stopKind !== "dismiss";
-  const isHandsFreeMode = recordingStatus.mode === "hands-free";
   const isNoteWindowEnabled = noteWindowFeatureFlag.enabled;
   // Draft (instruct) session: show a distinct indicator while dictating + processing.
   const isDraft = recordingStatus.isDraft;
@@ -155,11 +154,11 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
     }
   };
 
-  // Handler for stop button in hands-free mode
+  // A manual stop must also rescue a PTT session whose key-up was lost.
   const handleStopClick = async (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation(); // Prevent triggering the main button click
-    console.log("FAB: Stopping hands-free recording");
+    console.log("FAB: Stopping recording");
     await stopRecording();
   };
 
@@ -280,7 +279,7 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
     ? "h-[8px] w-[48px]"
     : showNotesAction
       ? "h-[24px] w-[124px]"
-      : isHandsFreeMode && isRecording
+      : isRecording
         ? "h-[24px] w-[100px]"
         : isDraft
           ? "h-[24px] w-[116px]"
@@ -295,14 +294,15 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
       return <ProcessingIndicator isDraft={isDraft} />;
     }
 
-    // Show dismiss (✗) | waveform | stop (✓) when hands-free and recording
-    if (isHandsFreeMode && isRecording) {
+    // Keep an explicit stop and dismiss available regardless of input mode.
+    if (isRecording) {
       return (
         <>
           <div className="h-full items-center flex ml-[5px]">
             <DismissButton onClick={handleDismissClick} />
           </div>
-          <div className="justify-center items-center flex flex-1 min-w-0">
+          <div className="justify-center items-center flex flex-1 gap-1 min-w-0">
+            {isDraft && <DraftPen />}
             <RippleWaveform levelRef={audioLevelRef} isRecording />
           </div>
           <div className="h-full items-center flex mr-[5px]">
