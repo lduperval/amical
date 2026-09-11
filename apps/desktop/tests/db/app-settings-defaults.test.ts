@@ -6,6 +6,7 @@ import {
   getAppSettings,
   updateSettingsSection,
 } from "../../src/db/app-settings";
+import { LINUX_DEFAULT_SHORTCUTS } from "../../src/utils/linux-default-shortcuts";
 
 /**
  * First-run seeding of dictation defaults: concrete languages (English + the
@@ -73,6 +74,26 @@ describe("default settings seed", () => {
     const settings = await getAppSettings();
 
     expect(settings.dictation?.languages).toEqual(["en", "fr"]);
+  });
+
+  it("seeds each default shortcut as one binding", async () => {
+    const settings = await getAppSettings();
+
+    expect(settings.shortcuts).toBeDefined();
+    for (const bindings of Object.values(settings.shortcuts ?? {})) {
+      expect(bindings).toHaveLength(1);
+      expect(bindings?.[0]?.length).toBeGreaterThan(0);
+    }
+    if (process.platform === "linux") {
+      expect(settings.shortcuts).toEqual(
+        Object.fromEntries(
+          Object.entries(LINUX_DEFAULT_SHORTCUTS).map(([type, chord]) => [
+            type,
+            [[...chord]],
+          ]),
+        ),
+      );
+    }
   });
 
   it("preserves concurrent updates to different sections", async () => {

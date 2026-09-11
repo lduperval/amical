@@ -72,9 +72,12 @@ export async function createTestDatabase(
     },
     clear: async () => {
       // Clear all tables
+      db.delete(schema.activityOutbox).run();
+      db.delete(schema.activityMaterializationState).run();
       db.delete(schema.syncOutbox).run();
       db.delete(schema.syncItemState).run();
       db.delete(schema.syncCollectionState).run();
+      db.delete(schema.syncScopeState).run();
       db.delete(schema.syncClientState).run();
       db.delete(schema.transcriptions).run();
       db.delete(schema.dailyStats).run();

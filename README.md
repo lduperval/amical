@@ -31,6 +31,7 @@
 - [✨ Features](#-features)
 - [🔰 Tech Stack](#-tech-stack)
 - [Local Development](#local-development)
+- [Building on Linux](#building-on-linux)
 - [🤗 Contributing](#-contributing)
 - [🎗 License](#-license)
 
@@ -105,8 +106,11 @@ Context-aware dictation that adapts to what you're doing: drafting an email, cha
 
 ## Local Development
 
-These steps run the desktop app, which currently supports macOS and Windows.
-Linux is not supported because the app does not yet have a Linux native helper.
+These steps run the desktop app across macOS, Windows, and Linux.
+
+### Building on Linux
+
+See [BUILD.md](BUILD.md) for detailed instructions, including building the Linux native helper and configuring optional `--input-method` flags.
 
 ### Prerequisites
 

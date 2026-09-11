@@ -3,7 +3,14 @@
     "loading": "載入 Amical 中..."
   },
   "errors": {
-    "generic": "發生錯誤，請再試一次。"
+    "generic": "發生錯誤，請再試一次。",
+    "renderer": {
+      "title": "發生錯誤",
+      "description": "Amical 發生未預期的錯誤。",
+      "tryAgain": "重試",
+      "reload": "重新載入視窗",
+      "supportNote": "如果問題持續發生，請聯絡支援團隊。"
+    }
   },
   "menu": {
     "file": "檔案",
@@ -50,13 +57,6 @@
       "completeFailed": "無法完成引導，請再試一次。",
       "resetSuccess": "成功重設引導程序",
       "resetFailed": "無法重設引導程序"
-    },
-    "errorBoundary": {
-      "title": "發生錯誤",
-      "description": "我們在引導過程中遇到錯誤，請再試一次。",
-      "tryAgain": "重試",
-      "restart": "重新啟動引導程序",
-      "supportNote": "如果問題持續發生，請聯絡支援團隊。"
     },
     "welcome": {
       "title": "您會如何使用 Amical？",
@@ -847,14 +847,19 @@
         "noKeysDetected": "未偵測到任何按鍵",
         "tooManyKeys": "按鍵數量過多 - 請使用 {{max}} 個或更少",
         "invalidKeyCombination": "無效的按鍵組合",
-        "alreadyAssigned": "該快捷鍵已指派給其他操作",
+        "alreadyAssigned": "該快捷鍵已指派",
         "conflictsWithSystem": "{{shortcut}} 與目前的系統快捷鍵衝突",
         "addModifier": "請增加修飾鍵（如 Cmd、Ctrl 或是 Fn）",
         "duplicateModifierPairs": "無法同時使用左側與右側的 {{modifier}}",
         "overlapsWithPushToTalk": "這與您的「按住說話」快捷鍵重疊，可能會導致問題"
       },
       "input": {
-        "pressKeys": "請按下按鍵..."
+        "pressKeys": "請按下按鍵...",
+        "unassigned": "未指派",
+        "edit": "編輯快捷鍵",
+        "clear": "清除快捷鍵",
+        "cancel": "取消編輯",
+        "add": "新增快捷鍵"
       }
     },
     "notes": {
@@ -910,6 +915,17 @@
       "title": "詞彙",
       "description": "管理您的自訂詞彙和用於聽寫的字詞替換。",
       "addButton": "新增單字",
+      "scope": {
+        "label": "詞彙範圍",
+        "all": "全部",
+        "user": "個人",
+        "org": "組織",
+        "personalBadge": "個人",
+        "organizationBadge": "組織",
+        "addOrganization": "新增組織單字",
+        "readOnly": "您目前的角色只能讀取組織詞彙。",
+        "unavailable": "目前沒有可用的組織詞彙。"
+      },
       "loading": "載入自訂詞彙中...",
       "empty": "找不到任何詞彙。加入您的第一個自訂詞彙以開始使用。",
       "toast": {
@@ -944,6 +960,17 @@
       "title": "片段",
       "description": "建立在聽寫時可展開為較長文字的簡短觸發詞。",
       "addButton": "新增",
+      "scope": {
+        "label": "文字片段範圍",
+        "all": "全部",
+        "user": "個人",
+        "org": "組織",
+        "personalBadge": "個人",
+        "organizationBadge": "組織",
+        "addOrganization": "新增組織文字片段",
+        "readOnly": "您目前的角色只能讀取組織文字片段。",
+        "unavailable": "目前沒有可用的組織文字片段。"
+      },
       "loading": "正在載入片段...",
       "empty": "尚無片段。新增您的第一個片段以開始使用。",
       "noResults": "找不到符合「{{query}}」的片段。",

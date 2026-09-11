@@ -1,26 +1,43 @@
 import { EventEmitter } from "node:events";
 import { BrowserWindow } from "electron";
+import { Effect, Fiber } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AuthState, AuthService } from "../../src/services/auth-service";
 import { SettingsSyncService } from "../../src/services/settings-sync-service";
 import {
-  SettingsSyncHttpError,
+  type SyncBootstrap,
   type SyncPullPage,
   type SyncPushMutation,
 } from "../../src/services/settings-sync-client";
-import type { CanonicalSyncItem } from "../../src/db/sync";
+import {
+  SettingsSyncDependencyFailure,
+  type SettingsSyncClientError,
+} from "../../src/services/settings-sync-errors";
+import {
+  AccessForbidden,
+  AuthenticationRequired,
+  CloudNetworkFailure,
+  settleExit,
+} from "../../src/types/errors";
+import type { CanonicalSyncItem, PushSyncResult } from "../../src/db/sync";
 import {
   snippets,
   syncClientState,
   syncCollectionState,
   syncItemState,
   syncOutbox,
+  syncScopeState,
   vocabulary,
 } from "../../src/db/schema";
-import { pauseSyncSession } from "../../src/db/sync";
+import {
+  beginUserSyncSession,
+  pauseSyncSession,
+  reconcileSyncScopes,
+} from "../../src/db/sync";
 import {
   bulkImportVocabulary,
+  createOrganizationVocabularyWord,
   createVocabularyWord,
   updateVocabulary,
 } from "../../src/db/vocabulary";
@@ -37,14 +54,39 @@ const AUTH_STATE: AuthState = {
   userInfo: { sub: "user-1" },
 };
 
+const USER_BOOTSTRAP_SCOPES = [
+  {
+    scopeType: "user" as const,
+    scopeId: "user-1",
+    role: null,
+    canWrite: true,
+    latestSyncVersion: 0,
+  },
+];
+
+function organizationBootstrapScope(scopeId: string, canWrite: boolean) {
+  return {
+    scopeType: "org" as const,
+    scopeId,
+    role: canWrite ? "admin" : "member",
+    canWrite,
+    latestSyncVersion: 0,
+  };
+}
+
 class FakeAuthService extends EventEmitter {
   state: AuthState | null = AUTH_STATE;
-  beforeLogout: (() => Promise<void>) | null = null;
+  beforeLogout: (() => Effect.Effect<void, unknown>) | null = null;
 
-  getAuthState = vi.fn(async () => this.state);
-  getIdToken = vi.fn(async () => this.state?.idToken ?? null);
+  getAuthState = vi.fn(
+    (): Effect.Effect<AuthState | null, unknown> => Effect.succeed(this.state),
+  );
+  getIdToken = vi.fn(() => Effect.succeed(this.state?.idToken ?? null));
+  refreshTokenIfNeeded = vi.fn(() => Effect.void);
 
-  registerBeforeLogoutHandler(handler: () => Promise<void>): () => void {
+  registerBeforeLogoutHandler(
+    handler: () => Effect.Effect<void, unknown>,
+  ): () => void {
     this.beforeLogout = handler;
     return () => {
       if (this.beforeLogout === handler) this.beforeLogout = null;
@@ -52,7 +94,7 @@ class FakeAuthService extends EventEmitter {
   }
 
   async logoutForTest(): Promise<void> {
-    await this.beforeLogout?.();
+    if (this.beforeLogout) await Effect.runPromise(this.beforeLogout());
     this.state = null;
     this.emit("logged-out");
   }
@@ -68,62 +110,70 @@ class InMemorySyncClient {
   ) {}
 
   readonly calls: string[] = [];
-  readonly bootstrap = vi.fn(async () => {
-    this.calls.push("bootstrap");
-    return {
-      collections: this.collections,
-      maxPushBatch: this.maxPushBatch,
-      maxPushBytes: 524288,
-      pullLimit: 200,
-    };
-  });
-  readonly push = vi.fn(async (mutations: SyncPushMutation[]) => {
-    this.calls.push("push");
-    return mutations.map((mutation) => {
-      this.version += 1;
-      this.items.set(mutation.syncId, {
-        collection: mutation.collection,
-        syncId: mutation.syncId,
-        syncVersion: this.version,
-        payload: mutation.payload,
-      });
-      return {
-        status: "ok" as const,
-        syncId: mutation.syncId,
-        syncVersion: this.version,
-        applied: true,
-      };
-    });
-  });
+  readonly bootstrap = vi.fn(
+    (): Effect.Effect<SyncBootstrap, SettingsSyncClientError> =>
+      Effect.sync(() => {
+        this.calls.push("bootstrap");
+        return {
+          scopes: USER_BOOTSTRAP_SCOPES,
+          collections: this.collections,
+          maxPushBatch: this.maxPushBatch,
+          maxPushBytes: 524288,
+          pullLimit: 200,
+        };
+      }),
+  );
+  readonly push = vi.fn(
+    (
+      mutations: SyncPushMutation[],
+    ): Effect.Effect<PushSyncResult[], SettingsSyncClientError> =>
+      Effect.sync(() => {
+        this.calls.push("push");
+        return mutations.map((mutation) => {
+          this.version += 1;
+          this.items.set(mutation.syncId, {
+            collection: mutation.collection,
+            syncId: mutation.syncId,
+            syncVersion: this.version,
+            payload: mutation.payload,
+          });
+          return {
+            status: "ok" as const,
+            syncId: mutation.syncId,
+            syncVersion: this.version,
+            applied: true,
+          };
+        });
+      }),
+  );
   readonly pull = vi.fn(
-    async (
+    (
       _scopeType: "user" | "org",
       _scopeId: string,
       cursors: ReadonlyArray<{
         collection: "vocabulary" | "snippet";
         cursor: number;
       }>,
-      _limit?: number,
-      _signal?: AbortSignal,
-    ): Promise<SyncPullPage> => {
-      this.calls.push("pull");
-      return {
-        collections: cursors.map(({ collection, cursor }) => {
-          const items = [...this.items.values()]
-            .filter(
-              (item) =>
-                item.collection === collection && item.syncVersion > cursor,
-            )
-            .sort((left, right) => left.syncVersion - right.syncVersion);
-          return {
-            collection,
-            items,
-            cursor: items.at(-1)?.syncVersion ?? cursor,
-            hasMore: false,
-          };
-        }),
-      };
-    },
+    ): Effect.Effect<SyncPullPage, SettingsSyncClientError> =>
+      Effect.sync(() => {
+        this.calls.push("pull");
+        return {
+          collections: cursors.map(({ collection, cursor }) => {
+            const items = [...this.items.values()]
+              .filter(
+                (item) =>
+                  item.collection === collection && item.syncVersion > cursor,
+              )
+              .sort((left, right) => left.syncVersion - right.syncVersion);
+            return {
+              collection,
+              items,
+              cursor: items.at(-1)?.syncVersion ?? cursor,
+              hasMore: false,
+            };
+          }),
+        };
+      }),
   );
 
   private version = 0;
@@ -144,9 +194,10 @@ describe("SettingsSyncService", () => {
   });
 
   afterEach(async () => {
-    await service?.shutdown();
+    if (service) await Effect.runPromise(service.shutdown());
     pauseSyncSession();
     await testDb.close();
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -170,10 +221,29 @@ describe("SettingsSyncService", () => {
       auth as unknown as AuthService,
       new InMemorySyncClient(),
     );
-    await service.initialize();
+    await Effect.runPromise(service.initialize());
 
     expect(await testDb.db.select().from(syncClientState)).toEqual([]);
     expect(await testDb.db.select().from(syncCollectionState)).toEqual([]);
+  });
+
+  it("classifies startup authentication dependency failures", async () => {
+    const cause = new Error("token store unavailable");
+    auth.getAuthState.mockReturnValueOnce(Effect.fail(cause));
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      new InMemorySyncClient(),
+    );
+
+    await expect(
+      Effect.runPromiseExit(service.initialize()).then(settleExit),
+    ).rejects.toEqual(
+      new SettingsSyncDependencyFailure({
+        message: "Settings sync authentication operation failed",
+        dependency: "authentication",
+        cause,
+      }),
+    );
   });
 
   it("resumes an existing account from its saved cursor on startup", async () => {
@@ -204,7 +274,7 @@ describe("SettingsSyncService", () => {
       client,
     );
 
-    await service.initialize();
+    await Effect.runPromise(service.initialize());
     await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
 
     expect(client.calls).toEqual(["bootstrap", "pull"]);
@@ -258,24 +328,18 @@ describe("SettingsSyncService", () => {
     });
 
     const client = new InMemorySyncClient();
-    let releaseBootstrap!: (value: {
-      collections: Array<"vocabulary" | "snippet">;
-      maxPushBatch: number;
-      maxPushBytes: number;
-      pullLimit: number;
-    }) => void;
-    client.bootstrap.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          releaseBootstrap = resolve;
-        }),
+    let releaseBootstrap!: (value: SyncBootstrap) => void;
+    client.bootstrap.mockImplementationOnce(() =>
+      Effect.async<SyncBootstrap>((resume) => {
+        releaseBootstrap = (value) => resume(Effect.succeed(value));
+      }),
     );
     service = SettingsSyncService.createForTests(
       auth as unknown as AuthService,
       client,
     );
 
-    await service.initialize();
+    await Effect.runPromise(service.initialize());
     await vi.waitFor(() => expect(client.bootstrap).toHaveBeenCalledOnce());
     await updateVocabulary(row.id, { word: "Edited during refresh" });
     expect((await testDb.db.select().from(syncOutbox))[0]).toMatchObject({
@@ -288,6 +352,7 @@ describe("SettingsSyncService", () => {
     });
 
     releaseBootstrap({
+      scopes: USER_BOOTSTRAP_SCOPES,
       collections: ["vocabulary", "snippet"],
       maxPushBatch: 100,
       maxPushBytes: 524288,
@@ -308,14 +373,195 @@ describe("SettingsSyncService", () => {
       auth as unknown as AuthService,
       client,
     );
-    await service.initialize();
+    await Effect.runPromise(service.initialize());
     await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
 
-    await service.shutdown();
+    await Effect.runPromise(service.shutdown());
     service = null;
 
     expect(await testDb.db.select().from(syncClientState)).toHaveLength(1);
     expect(await testDb.db.select().from(syncCollectionState)).toHaveLength(2);
+  });
+
+  it("can initialize the same service again after clean shutdown", async () => {
+    const client = new InMemorySyncClient();
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+
+    await Effect.runPromise(service.shutdown());
+    const firstInitialize = Effect.runPromise(service.initialize());
+    const secondInitialize = Effect.runPromise(service.initialize());
+    await Promise.all([firstInitialize, secondInitialize]);
+
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledTimes(2));
+  });
+
+  it("starts a fresh lifecycle when initialization is requested after shutdown", async () => {
+    let releaseInitialAuth!: (state: AuthState | null) => void;
+    auth.getAuthState
+      .mockImplementationOnce(() =>
+        Effect.async<AuthState | null>((resume) => {
+          releaseInitialAuth = (state) => resume(Effect.succeed(state));
+        }),
+      )
+      .mockReturnValue(Effect.succeed(AUTH_STATE));
+    const client = new InMemorySyncClient();
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+
+    const initialInitialize = Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(auth.getAuthState).toHaveBeenCalledOnce());
+    await Effect.runPromise(service.shutdown());
+
+    const restartedInitialize = Effect.runPromise(service.initialize());
+    releaseInitialAuth(AUTH_STATE);
+    await Promise.all([initialInitialize, restartedInitialize]);
+
+    expect(auth.getAuthState).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+  });
+
+  it("stops a restart requested immediately after clean shutdown", async () => {
+    const client = new InMemorySyncClient();
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+    await Effect.runPromise(service.shutdown());
+
+    const restartedInitialize = Effect.runPromise(service.initialize());
+    const restartedShutdown = Effect.runPromise(service.shutdown());
+    await Promise.all([restartedInitialize, restartedShutdown]);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(client.pull).toHaveBeenCalledOnce();
+    expect(auth.listenerCount("authenticated")).toBe(0);
+    expect(auth.beforeLogout).toBeNull();
+  });
+
+  it("cancels a restart queued while shutdown is still running", async () => {
+    const client = new InMemorySyncClient();
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+
+    const initialShutdown = Effect.runPromise(service.shutdown());
+    const queuedRestart = Effect.runPromise(service.initialize());
+    const finalShutdown = Effect.runPromise(service.shutdown());
+    await Promise.all([initialShutdown, queuedRestart, finalShutdown]);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(client.pull).toHaveBeenCalledOnce();
+    expect(auth.listenerCount("authenticated")).toBe(0);
+    expect(auth.beforeLogout).toBeNull();
+  });
+
+  it("keeps shared shutdown cleanup alive when its first caller is interrupted", async () => {
+    const client = new InMemorySyncClient();
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+
+    const internal = service as unknown as {
+      supervisor: {
+        handleShutdownEvent: (...args: unknown[]) => Effect.Effect<void, never>;
+      };
+    };
+    const originalHandleShutdown = internal.supervisor.handleShutdownEvent.bind(
+      internal.supervisor,
+    );
+    let shutdownStarted = false;
+    let releaseShutdown!: () => void;
+    vi.spyOn(internal.supervisor, "handleShutdownEvent").mockImplementationOnce(
+      (...args) =>
+        Effect.async<void>((resume) => {
+          shutdownStarted = true;
+          releaseShutdown = () => resume(originalHandleShutdown(...args));
+        }),
+    );
+
+    const firstCaller = Effect.runFork(service.shutdown());
+    await vi.waitFor(() => expect(shutdownStarted).toBe(true));
+    const sharedCaller = Effect.runPromise(service.shutdown());
+    const interruptFirstCaller = Effect.runPromise(
+      Fiber.interrupt(firstCaller),
+    );
+
+    releaseShutdown();
+    await sharedCaller;
+    await interruptFirstCaller;
+
+    expect(auth.listenerCount("authenticated")).toBe(0);
+    expect(auth.beforeLogout).toBeNull();
+  });
+
+  it("starts one lifecycle when restart is requested during shutdown", async () => {
+    const client = new InMemorySyncClient();
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+
+    const stopping = Effect.runPromise(service.shutdown());
+    const firstRestart = Effect.runPromise(service.initialize());
+    const secondRestart = Effect.runPromise(service.initialize());
+    await Promise.all([stopping, firstRestart, secondRestart]);
+
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledTimes(2));
+    expect(auth.listenerCount("authenticated")).toBe(1);
+    expect(auth.beforeLogout).not.toBeNull();
+  });
+
+  it("keeps every restart caller pending until shared initialization completes", async () => {
+    let releaseRestartAuth!: (state: AuthState | null) => void;
+    auth.getAuthState
+      .mockReturnValueOnce(Effect.succeed(AUTH_STATE))
+      .mockImplementationOnce(() =>
+        Effect.async<AuthState | null>((resume) => {
+          releaseRestartAuth = (state) => resume(Effect.succeed(state));
+        }),
+      );
+    const client = new InMemorySyncClient();
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+
+    const stopping = Effect.runPromise(service.shutdown());
+    const firstRestart = stopping.then(() =>
+      Effect.runPromise(service!.initialize()),
+    );
+    const queuedRestart = Effect.runPromise(service.initialize());
+    let queuedRestartSettled = false;
+    void queuedRestart.then(() => {
+      queuedRestartSettled = true;
+    });
+
+    await stopping;
+    await vi.waitFor(() => expect(auth.getAuthState).toHaveBeenCalledTimes(2));
+    expect(queuedRestartSettled).toBe(false);
+
+    releaseRestartAuth(AUTH_STATE);
+    await Promise.all([firstRestart, queuedRestart]);
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledTimes(2));
   });
 
   it("resumes a pending outbox after restart without logout", async () => {
@@ -323,7 +569,14 @@ describe("SettingsSyncService", () => {
       word: "Pending",
     });
     const unavailableClient = {
-      bootstrap: vi.fn().mockRejectedValue(new Error("offline")),
+      bootstrap: vi.fn(() =>
+        Effect.fail(
+          new CloudNetworkFailure({
+            message: "offline",
+            cause: new Error("offline"),
+          }),
+        ),
+      ),
       pull: vi.fn(),
       push: vi.fn(),
     };
@@ -331,13 +584,13 @@ describe("SettingsSyncService", () => {
       auth as unknown as AuthService,
       unavailableClient,
     );
-    await service.initialize();
+    await Effect.runPromise(service.initialize());
     await vi.waitFor(() =>
       expect(unavailableClient.bootstrap).toHaveBeenCalledOnce(),
     );
     expect(await testDb.db.select().from(syncOutbox)).toHaveLength(1);
 
-    await service.shutdown();
+    await Effect.runPromise(service.shutdown());
     service = null;
 
     const resumedClient = new InMemorySyncClient();
@@ -345,8 +598,11 @@ describe("SettingsSyncService", () => {
       auth as unknown as AuthService,
       resumedClient,
     );
-    await service.initialize();
-    await vi.waitFor(() => expect(resumedClient.push).toHaveBeenCalledOnce());
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => {
+      expect(resumedClient.push).toHaveBeenCalledOnce();
+      expect(resumedClient.pull).toHaveBeenCalledOnce();
+    });
 
     expect(resumedClient.push.mock.calls[0][0][0]).toMatchObject({
       expectedSyncVersion: null,
@@ -368,7 +624,7 @@ describe("SettingsSyncService", () => {
       client,
     );
 
-    await service.initialize();
+    await Effect.runPromise(service.initialize());
     await vi.waitFor(async () => {
       expect(client.push).toHaveBeenCalledOnce();
       expect(await testDb.db.select().from(syncOutbox)).toEqual([]);
@@ -392,7 +648,7 @@ describe("SettingsSyncService", () => {
       client,
     );
 
-    await service.initialize();
+    await Effect.runPromise(service.initialize());
     await vi.waitFor(() => {
       expect(client.push).toHaveBeenCalledOnce();
       expect(client.pull).toHaveBeenCalledOnce();
@@ -430,7 +686,7 @@ describe("SettingsSyncService", () => {
       auth as unknown as AuthService,
       client,
     );
-    await service.initialize();
+    await Effect.runPromise(service.initialize());
 
     auth.state = AUTH_STATE;
     auth.emit("authenticated", AUTH_STATE);
@@ -442,46 +698,411 @@ describe("SettingsSyncService", () => {
     ]);
   });
 
-  it.each([401, 403])(
-    "retains durable state and waits for an auth change after HTTP %i",
-    async (status) => {
-      const row = await createVocabularyWord({
-        word: "Before",
-      });
+  it("ignores token refresh until explicit login binding is active", async () => {
+    auth.state = null;
+    const client = new InMemorySyncClient();
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+
+    auth.state = AUTH_STATE;
+    auth.emit("authenticated", AUTH_STATE);
+    auth.emit("token-refreshed", AUTH_STATE);
+
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+    expect(client.bootstrap).toHaveBeenCalledOnce();
+  });
+
+  it("ignores a same-turn wake while token refresh is rebinding sync", async () => {
+    const client = new InMemorySyncClient();
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+
+    auth.emit("token-refreshed", AUTH_STATE);
+    service.wake();
+
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(client.bootstrap).toHaveBeenCalledTimes(2);
+    expect(client.pull).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains organization state and retries after AuthenticationRequired", async () => {
+    let rejectBootstrap = false;
+    const client = {
+      bootstrap: vi.fn(() =>
+        rejectBootstrap
+          ? Effect.fail(
+              new AuthenticationRequired({
+                message: "Request rejected",
+              }),
+            )
+          : Effect.succeed({
+              scopes: [
+                ...USER_BOOTSTRAP_SCOPES,
+                organizationBootstrapScope("org-1", true),
+              ],
+              collections: ["vocabulary", "snippet"],
+              maxPushBatch: 100,
+              maxPushBytes: 524288,
+              pullLimit: 200,
+            } satisfies SyncBootstrap),
+      ),
+      pull: vi.fn(
+        (
+          _scopeType: "user" | "org",
+          _scopeId: string,
+          cursors: ReadonlyArray<{
+            collection: "vocabulary" | "snippet";
+            cursor: number;
+          }>,
+        ) =>
+          Effect.succeed({
+            collections: cursors.map(({ collection, cursor }) => ({
+              collection,
+              items: [],
+              cursor,
+              hasMore: false,
+            })),
+          } satisfies SyncPullPage),
+      ),
+      push: vi.fn(),
+    };
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledTimes(2));
+
+    const row = await createOrganizationVocabularyWord({ word: "Keep" });
+    rejectBootstrap = true;
+    auth.emit("token-refreshed", AUTH_STATE);
+    await vi.waitFor(() => expect(client.bootstrap).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() =>
+      expect(auth.refreshTokenIfNeeded).toHaveBeenCalledWith(true),
+    );
+
+    expect(await testDb.db.select().from(vocabulary)).toEqual([
+      expect.objectContaining({ id: row.id, scopeId: "org-1" }),
+    ]);
+    expect(await testDb.db.select().from(syncOutbox)).toEqual([
+      expect.objectContaining({
+        scopeType: "org",
+        scopeId: "org-1",
+        syncId: row.id,
+      }),
+    ]);
+    service.wake();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(client.bootstrap).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries once after AuthenticationRequired without forcing a second refresh", async () => {
+    await createVocabularyWord({ word: "Pending" });
+    auth.refreshTokenIfNeeded.mockImplementationOnce(() =>
+      Effect.sync(() => {
+        auth.emit("token-refreshed", AUTH_STATE);
+      }),
+    );
+    const client = {
+      bootstrap: vi.fn(() =>
+        Effect.fail(
+          new AuthenticationRequired({
+            message: "Token rejected",
+          }),
+        ),
+      ),
+      pull: vi.fn(),
+      push: vi.fn(),
+    };
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.bootstrap).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(auth.refreshTokenIfNeeded).toHaveBeenCalledTimes(1);
+    expect(auth.refreshTokenIfNeeded).toHaveBeenCalledWith(true);
+    expect(client.bootstrap).toHaveBeenCalledTimes(2);
+    expect(client.pull).not.toHaveBeenCalled();
+    expect(client.push).not.toHaveBeenCalled();
+    expect(await testDb.db.select().from(syncOutbox)).toHaveLength(1);
+  });
+
+  it("retries once and retains blocked work when forced refresh emits no event", async () => {
+    await createVocabularyWord({ word: "Pending" });
+    const client = {
+      bootstrap: vi.fn(() =>
+        Effect.fail(
+          new AuthenticationRequired({
+            message: "Token rejected",
+          }),
+        ),
+      ),
+      pull: vi.fn(),
+      push: vi.fn(),
+    };
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() =>
+      expect(auth.refreshTokenIfNeeded).toHaveBeenCalledWith(true),
+    );
+    service.wake();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(auth.refreshTokenIfNeeded).toHaveBeenCalledTimes(1);
+    expect(client.bootstrap).toHaveBeenCalledTimes(2);
+    expect(await testDb.db.select().from(syncOutbox)).toHaveLength(1);
+  });
+
+  it("purges persisted organization state after bootstrap HTTP 403", async () => {
+    const personal = await createVocabularyWord({ word: "Personal" });
+    await beginUserSyncSession("user-1");
+    await reconcileSyncScopes("user-1", [
+      ...USER_BOOTSTRAP_SCOPES,
+      organizationBootstrapScope("org-1", true),
+    ]);
+    const organization = await createOrganizationVocabularyWord({
+      word: "Organization",
+    });
+    pauseSyncSession();
+
+    const client = {
+      bootstrap: vi.fn(() =>
+        Effect.fail(
+          new AccessForbidden({
+            message: "Forbidden",
+            meta: { httpStatus: 403 },
+          }),
+        ),
+      ),
+      pull: vi.fn(),
+      push: vi.fn(),
+    };
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.bootstrap).toHaveBeenCalledOnce());
+    await vi.waitFor(async () => {
+      expect(
+        (await testDb.db.select().from(vocabulary)).filter(
+          (row) => row.scopeType === "org",
+        ),
+      ).toEqual([]);
+    });
+
+    expect(await testDb.db.select().from(vocabulary)).toEqual([
+      expect.objectContaining({ id: personal.id, scopeType: "user" }),
+    ]);
+    expect(await testDb.db.select().from(syncOutbox)).not.toContainEqual(
+      expect.objectContaining({ syncId: organization.id }),
+    );
+    expect(
+      (await testDb.db.select().from(syncCollectionState)).filter(
+        (row) => row.scopeType === "org",
+      ),
+    ).toEqual([]);
+    expect(
+      (await testDb.db.select().from(syncScopeState)).filter(
+        (row) => row.scopeType === "org",
+      ),
+    ).toEqual([]);
+    expect(auth.refreshTokenIfNeeded).not.toHaveBeenCalled();
+  });
+
+  it("ignores an in-flight HTTP 401 that completes after token refresh", async () => {
+    const firstBootstrap: {
+      reject?: (error: AuthenticationRequired) => void;
+      interrupted?: boolean;
+    } = {};
+    const client = {
+      bootstrap: vi.fn(() => {
+        if (client.bootstrap.mock.calls.length === 1) {
+          return Effect.async<SyncBootstrap, AuthenticationRequired>(
+            (resume) => {
+              firstBootstrap.reject = (error) => resume(Effect.fail(error));
+              return Effect.sync(() => {
+                firstBootstrap.interrupted = true;
+              });
+            },
+          );
+        }
+        return Effect.succeed({
+          scopes: USER_BOOTSTRAP_SCOPES,
+          collections: ["vocabulary", "snippet"] as Array<
+            "vocabulary" | "snippet"
+          >,
+          maxPushBatch: 100,
+          maxPushBytes: 524288,
+          pullLimit: 200,
+        });
+      }),
+      pull: vi.fn(
+        (
+          _scopeType: "user" | "org",
+          _scopeId: string,
+          cursors: ReadonlyArray<{
+            collection: "vocabulary" | "snippet";
+            cursor: number;
+          }>,
+        ) =>
+          Effect.succeed({
+            collections: cursors.map(({ collection, cursor }) => ({
+              collection,
+              items: [],
+              cursor,
+              hasMore: false,
+            })),
+          } satisfies SyncPullPage),
+      ),
+      push: vi.fn(),
+    };
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.bootstrap).toHaveBeenCalledOnce());
+
+    auth.emit("token-refreshed", AUTH_STATE);
+    await vi.waitFor(() => expect(firstBootstrap.interrupted).toBe(true));
+    firstBootstrap.reject?.(
+      new AuthenticationRequired({
+        message: "Stale token",
+        meta: { httpStatus: 401 },
+      }),
+    );
+
+    await vi.waitFor(() => expect(client.bootstrap).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+    expect(auth.refreshTokenIfNeeded).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: 401, retained: true },
+    { status: 403, retained: false },
+  ])(
+    "handles organization pull HTTP $status without conflating authentication and access loss",
+    async ({ status, retained }) => {
+      let rejectOrganizationPull = false;
+      const syncId = "11111111-1111-4111-8111-111111111111";
       const client = {
-        bootstrap: vi
-          .fn()
-          .mockRejectedValue(
-            new SettingsSyncHttpError("Request rejected", status),
-          ),
-        pull: vi.fn(),
+        bootstrap: vi.fn(
+          (): Effect.Effect<SyncBootstrap> =>
+            Effect.succeed({
+              scopes: [
+                ...USER_BOOTSTRAP_SCOPES,
+                organizationBootstrapScope("org-1", true),
+              ],
+              collections: ["vocabulary", "snippet"],
+              maxPushBatch: 100,
+              maxPushBytes: 524288,
+              pullLimit: 200,
+            }),
+        ),
+        pull: vi.fn(
+          (
+            scopeType: "user" | "org",
+            _scopeId: string,
+            cursors: ReadonlyArray<{
+              collection: "vocabulary" | "snippet";
+              cursor: number;
+            }>,
+          ) =>
+            scopeType === "org" && rejectOrganizationPull
+              ? Effect.fail(
+                  status === 401
+                    ? new AuthenticationRequired({
+                        message: "Scope rejected",
+                        meta: { httpStatus: 401 },
+                      })
+                    : new AccessForbidden({
+                        message: "Scope rejected",
+                        meta: { httpStatus: 403 },
+                      }),
+                )
+              : Effect.succeed({
+                  collections: cursors.map(({ collection, cursor }) => ({
+                    collection,
+                    items:
+                      scopeType === "org" &&
+                      collection === "vocabulary" &&
+                      cursor === 0
+                        ? [
+                            {
+                              collection,
+                              syncId,
+                              syncVersion: 1,
+                              payload: {
+                                word: "Organization",
+                                replacement: null,
+                              },
+                            },
+                          ]
+                        : [],
+                    cursor:
+                      scopeType === "org" &&
+                      collection === "vocabulary" &&
+                      cursor === 0
+                        ? 1
+                        : cursor,
+                    hasMore: false,
+                  })),
+                }),
+        ),
         push: vi.fn(),
       };
       service = SettingsSyncService.createForTests(
         auth as unknown as AuthService,
         client,
       );
-      await service.initialize();
-      await vi.waitFor(() => expect(client.bootstrap).toHaveBeenCalledOnce());
-      await new Promise((resolve) => setTimeout(resolve, 0));
-
-      await updateVocabulary(row.id, { word: "After" });
-      service.wake();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-
-      expect(await testDb.db.select().from(syncClientState)).toHaveLength(1);
-      expect((await testDb.db.select().from(syncOutbox))[0]).toMatchObject({
-        scopeId: "user-1",
-        desiredPayload: { word: "After", replacement: null },
+      await Effect.runPromise(service.initialize());
+      await vi.waitFor(() => {
+        expect(testDb.db.select().from(vocabulary).all()).toEqual([
+          expect.objectContaining({ id: syncId, scopeId: "org-1" }),
+        ]);
       });
-      expect(client.bootstrap).toHaveBeenCalledOnce();
 
-      auth.emit("token-refreshed", AUTH_STATE);
-      await vi.waitFor(() => expect(client.bootstrap).toHaveBeenCalledTimes(2));
+      rejectOrganizationPull = true;
+      service.wake();
+      await vi.waitFor(() =>
+        expect(client.pull).toHaveBeenCalledTimes(status === 401 ? 6 : 4),
+      );
+      await vi.waitFor(() => {
+        expect(
+          testDb.db
+            .select()
+            .from(vocabulary)
+            .all()
+            .some((row) => row.id === syncId),
+        ).toBe(retained);
+      });
+
+      if (status === 401) {
+        expect(auth.refreshTokenIfNeeded).toHaveBeenCalledWith(true);
+      } else {
+        expect(auth.refreshTokenIfNeeded).not.toHaveBeenCalled();
+      }
     },
   );
 
-  it("reconciles once at login, then uses incremental sync for edits", async () => {
+  it("revalidates bootstrap before syncing later edits", async () => {
     auth.state = null;
     const row = await createVocabularyWord({
       word: "Amical",
@@ -491,7 +1112,7 @@ describe("SettingsSyncService", () => {
       auth as unknown as AuthService,
       client,
     );
-    await service.initialize();
+    await Effect.runPromise(service.initialize());
 
     auth.state = AUTH_STATE;
     auth.emit("authenticated", AUTH_STATE);
@@ -517,7 +1138,7 @@ describe("SettingsSyncService", () => {
       },
       { timeout: 2_000 },
     );
-    expect(client.bootstrap).toHaveBeenCalledTimes(1);
+    expect(client.bootstrap).toHaveBeenCalledTimes(2);
     expect(client.push.mock.calls[1][0][0]).toMatchObject({
       expectedSyncVersion: 1,
       payload: { word: "Amical Desktop", replacement: null },
@@ -530,7 +1151,7 @@ describe("SettingsSyncService", () => {
       auth as unknown as AuthService,
       client,
     );
-    await service.initialize();
+    await Effect.runPromise(service.initialize());
     await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
 
     await createSnippet({ trigger: "first", content: "First" });
@@ -565,7 +1186,7 @@ describe("SettingsSyncService", () => {
       client,
     );
 
-    await service.initialize();
+    await Effect.runPromise(service.initialize());
     await vi.waitFor(
       () => {
         expect(client.push).toHaveBeenCalledTimes(101);
@@ -578,34 +1199,378 @@ describe("SettingsSyncService", () => {
     expect(client.calls.at(-1)).toBe("pull");
   });
 
-  it("clears sync state and ignores a pull response after logout", async () => {
-    const pullState: {
-      resolve?: (page: SyncPullPage) => void;
-      signal?: AbortSignal;
-    } = {};
+  it("activates organization sync and applies advertised write capability", async () => {
+    let canWrite = false;
+    let version = 0;
     const client = {
-      bootstrap: vi.fn().mockResolvedValue({
-        collections: ["vocabulary", "snippet"] as Array<
-          "vocabulary" | "snippet"
-        >,
-        maxPushBatch: 100,
-        maxPushBytes: 524288,
-        pullLimit: 200,
-      }),
+      bootstrap: vi.fn(
+        (): Effect.Effect<SyncBootstrap> =>
+          Effect.succeed({
+            scopes: [
+              ...USER_BOOTSTRAP_SCOPES,
+              organizationBootstrapScope("org-1", canWrite),
+            ],
+            collections: ["vocabulary", "snippet"],
+            maxPushBatch: 100,
+            maxPushBytes: 524288,
+            pullLimit: 200,
+          }),
+      ),
       pull: vi.fn(
         (
           _scopeType: "user" | "org",
           _scopeId: string,
-          _cursors: ReadonlyArray<{
+          cursors: ReadonlyArray<{
             collection: "vocabulary" | "snippet";
             cursor: number;
           }>,
-          _limit: number,
-          signal: AbortSignal,
+        ) =>
+          Effect.succeed({
+            collections: cursors.map(({ collection, cursor }) => ({
+              collection,
+              items: [],
+              cursor,
+              hasMore: false,
+            })),
+          } satisfies SyncPullPage),
+      ),
+      push: vi.fn((mutations: SyncPushMutation[]) =>
+        Effect.sync(() =>
+          mutations.map((mutation) => ({
+            status: "ok" as const,
+            syncId: mutation.syncId,
+            syncVersion: ++version,
+            applied: true,
+          })),
+        ),
+      ),
+    };
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledTimes(2));
+    expect(client.pull.mock.calls.map((call) => call.slice(0, 2))).toEqual([
+      ["user", "user-1"],
+      ["org", "org-1"],
+    ]);
+    await expect(
+      createOrganizationVocabularyWord({ word: "Blocked" }),
+    ).rejects.toThrow("read-only");
+    expect(client.push).not.toHaveBeenCalled();
+
+    canWrite = true;
+    auth.emit("token-refreshed", AUTH_STATE);
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledTimes(4));
+    const row = await createOrganizationVocabularyWord({ word: "Published" });
+    await vi.waitFor(() => expect(client.push).toHaveBeenCalledOnce(), {
+      timeout: 2_000,
+    });
+    expect(client.push.mock.calls[0][0]).toEqual([
+      expect.objectContaining({
+        scopeType: "org",
+        scopeId: "org-1",
+        syncId: row.id,
+      }),
+    ]);
+  });
+
+  it("revalidates a rejected organization push and keeps advertised read access", async () => {
+    let canWrite = true;
+    const client = {
+      bootstrap: vi.fn(
+        (): Effect.Effect<SyncBootstrap> =>
+          Effect.succeed({
+            scopes: [
+              ...USER_BOOTSTRAP_SCOPES,
+              organizationBootstrapScope("org-1", canWrite),
+            ],
+            collections: ["vocabulary", "snippet"],
+            maxPushBatch: 100,
+            maxPushBytes: 524288,
+            pullLimit: 200,
+          }),
+      ),
+      pull: vi.fn(
+        (
+          _scopeType: "user" | "org",
+          _scopeId: string,
+          cursors: ReadonlyArray<{
+            collection: "vocabulary" | "snippet";
+            cursor: number;
+          }>,
+        ) =>
+          Effect.succeed({
+            collections: cursors.map(({ collection, cursor }) => ({
+              collection,
+              items: [],
+              cursor,
+              hasMore: false,
+            })),
+          } satisfies SyncPullPage),
+      ),
+      push: vi.fn((mutations: SyncPushMutation[]) =>
+        Effect.sync(() => {
+          canWrite = false;
+          return mutations.map((mutation) => ({
+            status: "error" as const,
+            syncId: mutation.syncId,
+            reason: "unauthorized_scope" as const,
+            message: "Role can no longer write",
+          }));
+        }),
+      ),
+    };
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledTimes(2));
+
+    const row = await createOrganizationVocabularyWord({ word: "Rejected" });
+    await vi.waitFor(() => expect(client.bootstrap).toHaveBeenCalledTimes(3), {
+      timeout: 2_000,
+    });
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledTimes(5));
+
+    expect(await testDb.db.select().from(syncOutbox)).toEqual([]);
+    expect(await testDb.db.select().from(vocabulary)).not.toContainEqual(
+      expect.objectContaining({ id: row.id }),
+    );
+    expect(await testDb.db.select().from(syncScopeState)).toContainEqual(
+      expect.objectContaining({
+        scopeType: "org",
+        scopeId: "org-1",
+        canWrite: false,
+      }),
+    );
+    await expect(
+      createOrganizationVocabularyWord({ word: "Still blocked" }),
+    ).rejects.toThrow("read-only");
+  });
+
+  it("revalidates a rejected organization push and purges lost access", async () => {
+    let organizationAvailable = true;
+    const client = {
+      bootstrap: vi.fn(
+        (): Effect.Effect<SyncBootstrap> =>
+          Effect.succeed({
+            scopes: [
+              ...USER_BOOTSTRAP_SCOPES,
+              ...(organizationAvailable
+                ? [organizationBootstrapScope("org-1", true)]
+                : []),
+            ],
+            collections: ["vocabulary", "snippet"],
+            maxPushBatch: 100,
+            maxPushBytes: 524288,
+            pullLimit: 200,
+          }),
+      ),
+      pull: vi.fn(
+        (
+          _scopeType: "user" | "org",
+          _scopeId: string,
+          cursors: ReadonlyArray<{
+            collection: "vocabulary" | "snippet";
+            cursor: number;
+          }>,
+        ) =>
+          Effect.succeed({
+            collections: cursors.map(({ collection, cursor }) => ({
+              collection,
+              items: [],
+              cursor,
+              hasMore: false,
+            })),
+          } satisfies SyncPullPage),
+      ),
+      push: vi.fn((mutations: SyncPushMutation[]) =>
+        Effect.sync(() => {
+          organizationAvailable = false;
+          return mutations.map((mutation) => ({
+            status: "error" as const,
+            syncId: mutation.syncId,
+            reason: "unauthorized_scope" as const,
+            message: "Organization access was removed",
+          }));
+        }),
+      ),
+    };
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledTimes(2));
+
+    await createOrganizationVocabularyWord({ word: "Remove" });
+    await vi.waitFor(() => expect(client.bootstrap).toHaveBeenCalledTimes(3), {
+      timeout: 2_000,
+    });
+    await vi.waitFor(() => {
+      expect(
+        testDb.db
+          .select()
+          .from(syncScopeState)
+          .all()
+          .filter((row) => row.scopeType === "org"),
+      ).toEqual([]);
+    });
+
+    expect(
+      (await testDb.db.select().from(vocabulary)).filter(
+        (row) => row.scopeType === "org",
+      ),
+    ).toEqual([]);
+    expect(
+      (await testDb.db.select().from(syncOutbox)).filter(
+        (row) => row.scopeType === "org",
+      ),
+    ).toEqual([]);
+  });
+
+  it("purges the previous organization on switch and access loss", async () => {
+    let organizationId: string | null = "org-1";
+    const remoteIds = {
+      "org-1": "11111111-1111-4111-8111-111111111111",
+      "org-2": "22222222-2222-4222-8222-222222222222",
+    } as const;
+    const client = {
+      bootstrap: vi.fn(
+        (): Effect.Effect<SyncBootstrap> =>
+          Effect.succeed({
+            scopes: [
+              ...USER_BOOTSTRAP_SCOPES,
+              ...(organizationId
+                ? [organizationBootstrapScope(organizationId, true)]
+                : []),
+            ],
+            collections: ["vocabulary", "snippet"],
+            maxPushBatch: 100,
+            maxPushBytes: 524288,
+            pullLimit: 200,
+          }),
+      ),
+      pull: vi.fn(
+        (
+          scopeType: "user" | "org",
+          scopeId: string,
+          cursors: ReadonlyArray<{
+            collection: "vocabulary" | "snippet";
+            cursor: number;
+          }>,
+        ) =>
+          Effect.succeed({
+            collections: cursors.map(({ collection, cursor }) => {
+              if (
+                scopeType === "org" &&
+                collection === "vocabulary" &&
+                cursor === 0
+              ) {
+                const id = remoteIds[scopeId as keyof typeof remoteIds];
+                return {
+                  collection,
+                  items: [
+                    {
+                      collection,
+                      syncId: id,
+                      syncVersion: 1,
+                      payload: { word: scopeId, replacement: null },
+                    },
+                  ],
+                  cursor: 1,
+                  hasMore: false,
+                };
+              }
+              return { collection, items: [], cursor, hasMore: false };
+            }),
+          } satisfies SyncPullPage),
+      ),
+      push: vi.fn(),
+    };
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => {
+      expect(testDb.db.select().from(vocabulary).all()).toEqual([
+        expect.objectContaining({ scopeId: "org-1", word: "org-1" }),
+      ]);
+    });
+
+    await createOrganizationVocabularyWord({ word: "Queued for org 1" });
+    organizationId = "org-2";
+    auth.emit("token-refreshed", AUTH_STATE);
+    await vi.waitFor(() => {
+      expect(testDb.db.select().from(vocabulary).all()).toEqual([
+        expect.objectContaining({ scopeId: "org-2", word: "org-2" }),
+      ]);
+    });
+    expect(await testDb.db.select().from(syncOutbox)).toEqual([]);
+
+    organizationId = null;
+    auth.emit("token-refreshed", AUTH_STATE);
+    await vi.waitFor(() => {
+      expect(testDb.db.select().from(vocabulary).all()).toEqual([]);
+      expect(
+        testDb.db
+          .select()
+          .from(syncCollectionState)
+          .all()
+          .filter((row) => row.scopeType === "org"),
+      ).toEqual([]);
+    });
+  });
+
+  it("fences an in-flight organization pull before switching organizations", async () => {
+    let organizationId = "org-1";
+    const oldPull: {
+      resolve?: (page: SyncPullPage) => void;
+      interrupted?: boolean;
+    } = {};
+    const client = {
+      bootstrap: vi.fn(
+        (): Effect.Effect<SyncBootstrap> =>
+          Effect.succeed({
+            scopes: [
+              ...USER_BOOTSTRAP_SCOPES,
+              organizationBootstrapScope(organizationId, true),
+            ],
+            collections: ["vocabulary", "snippet"],
+            maxPushBatch: 100,
+            maxPushBytes: 524288,
+            pullLimit: 200,
+          }),
+      ),
+      pull: vi.fn(
+        (
+          scopeType: "user" | "org",
+          scopeId: string,
+          cursors: ReadonlyArray<{
+            collection: "vocabulary" | "snippet";
+            cursor: number;
+          }>,
         ) => {
-          pullState.signal = signal;
-          return new Promise<SyncPullPage>((resolve) => {
-            pullState.resolve = resolve;
+          if (scopeType === "org" && scopeId === "org-1") {
+            return Effect.async<SyncPullPage>((resume) => {
+              oldPull.resolve = (page) => resume(Effect.succeed(page));
+              return Effect.sync(() => {
+                oldPull.interrupted = true;
+              });
+            });
+          }
+          return Effect.succeed({
+            collections: cursors.map(({ collection, cursor }) => ({
+              collection,
+              items: [],
+              cursor,
+              hasMore: false,
+            })),
           });
         },
       ),
@@ -615,15 +1580,100 @@ describe("SettingsSyncService", () => {
       auth as unknown as AuthService,
       client,
     );
-    await service.initialize();
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(oldPull.resolve).toBeDefined());
+
+    organizationId = "org-2";
+    auth.emit("token-refreshed", AUTH_STATE);
+    await vi.waitFor(() => expect(oldPull.interrupted).toBe(true));
+    oldPull.resolve?.({
+      collections: [
+        {
+          collection: "vocabulary",
+          items: [
+            {
+              collection: "vocabulary",
+              syncId: "11111111-1111-4111-8111-111111111111",
+              syncVersion: 1,
+              payload: { word: "Old organization", replacement: null },
+            },
+          ],
+          cursor: 1,
+          hasMore: false,
+        },
+        {
+          collection: "snippet",
+          items: [],
+          cursor: 0,
+          hasMore: false,
+        },
+      ],
+    });
+
+    await vi.waitFor(() => expect(client.bootstrap).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => {
+      expect(
+        testDb.db
+          .select()
+          .from(syncScopeState)
+          .all()
+          .filter((row) => row.scopeType === "org"),
+      ).toEqual([expect.objectContaining({ scopeId: "org-2" })]);
+    });
+    expect(await testDb.db.select().from(vocabulary)).toEqual([]);
+  });
+
+  it("clears sync state and ignores a pull response after logout", async () => {
+    const pullState: {
+      resolve?: (page: SyncPullPage) => void;
+      interrupted?: boolean;
+    } = {};
+    const client = {
+      bootstrap: vi.fn(() =>
+        Effect.succeed({
+          scopes: USER_BOOTSTRAP_SCOPES,
+          collections: ["vocabulary", "snippet"] as Array<
+            "vocabulary" | "snippet"
+          >,
+          maxPushBatch: 100,
+          maxPushBytes: 524288,
+          pullLimit: 200,
+        }),
+      ),
+      pull: vi.fn(() =>
+        Effect.async<SyncPullPage>((resume) => {
+          pullState.resolve = (page) => resume(Effect.succeed(page));
+          return Effect.sync(() => {
+            pullState.interrupted = true;
+          });
+        }),
+      ),
+      push: vi.fn(),
+    };
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
 
     await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+    await testDb.db.insert(vocabulary).values([
+      { word: "Personal", scopeType: "user", scopeId: "" },
+      {
+        word: "Organization",
+        scopeType: "org",
+        scopeId: "org-1",
+      },
+    ]);
     await auth.logoutForTest();
-    expect(pullState.signal?.aborted).toBe(true);
+    expect(pullState.interrupted).toBe(true);
     expect(await testDb.db.select().from(syncClientState)).toEqual([]);
     expect(await testDb.db.select().from(syncCollectionState)).toEqual([]);
     expect(await testDb.db.select().from(syncItemState)).toEqual([]);
     expect(await testDb.db.select().from(syncOutbox)).toEqual([]);
+    expect(await testDb.db.select().from(vocabulary)).toEqual([
+      expect.objectContaining({ word: "Personal", scopeType: "user" }),
+    ]);
 
     const syncId = "11111111-1111-4111-8111-111111111111";
     pullState.resolve?.({
@@ -644,10 +1694,76 @@ describe("SettingsSyncService", () => {
       ],
     });
 
-    await service.shutdown();
+    await Effect.runPromise(service.shutdown());
     service = null;
     expect(await testDb.db.select().from(snippets)).toEqual([]);
     expect(await testDb.db.select().from(syncItemState)).toEqual([]);
+  });
+
+  it("falls back to direct cleanup if the supervisor stops before logout", async () => {
+    const client = {
+      bootstrap: vi.fn(
+        (): Effect.Effect<SyncBootstrap> =>
+          Effect.succeed({
+            scopes: [
+              ...USER_BOOTSTRAP_SCOPES,
+              organizationBootstrapScope("org-1", true),
+            ],
+            collections: ["vocabulary", "snippet"],
+            maxPushBatch: 100,
+            maxPushBytes: 524288,
+            pullLimit: 200,
+          }),
+      ),
+      pull: vi.fn(
+        (
+          _scopeType: "user" | "org",
+          _scopeId: string,
+          cursors: ReadonlyArray<{
+            collection: "vocabulary" | "snippet";
+            cursor: number;
+          }>,
+        ) =>
+          Effect.succeed({
+            collections: cursors.map(({ collection, cursor }) => ({
+              collection,
+              items: [],
+              cursor,
+              hasMore: false,
+            })),
+          } satisfies SyncPullPage),
+      ),
+      push: vi.fn(),
+    };
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledTimes(2));
+    await testDb.db.insert(vocabulary).values([
+      { word: "Personal", scopeType: "user", scopeId: "" },
+      { word: "Organization", scopeType: "org", scopeId: "org-1" },
+    ]);
+
+    const internal = service as unknown as {
+      supervisor: {
+        handleEvent: (...args: unknown[]) => Effect.Effect<never>;
+      };
+    };
+    const handleEvent = vi
+      .spyOn(internal.supervisor, "handleEvent")
+      .mockReturnValueOnce(Effect.interrupt);
+    service.wake();
+    await vi.waitFor(() => expect(handleEvent).toHaveBeenCalled());
+
+    await auth.logoutForTest();
+
+    expect(await testDb.db.select().from(vocabulary)).toEqual([
+      expect.objectContaining({ word: "Personal", scopeType: "user" }),
+    ]);
+    expect(await testDb.db.select().from(syncCollectionState)).toEqual([]);
+    expect(await testDb.db.select().from(syncScopeState)).toEqual([]);
   });
 
   it("ignores a bootstrap response that arrives after logout", async () => {
@@ -655,26 +1771,18 @@ describe("SettingsSyncService", () => {
       word: "Keep local",
     });
     const bootstrapState: {
-      resolve?: (value: {
-        collections: Array<"vocabulary" | "snippet">;
-        maxPushBatch: number;
-        maxPushBytes: number;
-        pullLimit: number;
-      }) => void;
-      signal?: AbortSignal;
+      resolve?: (value: SyncBootstrap) => void;
+      interrupted?: boolean;
     } = {};
     const client = {
-      bootstrap: vi.fn((_accountId: string, signal: AbortSignal) => {
-        bootstrapState.signal = signal;
-        return new Promise<{
-          collections: Array<"vocabulary" | "snippet">;
-          maxPushBatch: number;
-          maxPushBytes: number;
-          pullLimit: number;
-        }>((resolve) => {
-          bootstrapState.resolve = resolve;
-        });
-      }),
+      bootstrap: vi.fn(() =>
+        Effect.async<SyncBootstrap>((resume) => {
+          bootstrapState.resolve = (value) => resume(Effect.succeed(value));
+          return Effect.sync(() => {
+            bootstrapState.interrupted = true;
+          });
+        }),
+      ),
       pull: vi.fn(),
       push: vi.fn(),
     };
@@ -682,12 +1790,12 @@ describe("SettingsSyncService", () => {
       auth as unknown as AuthService,
       client,
     );
-    await service.initialize();
+    await Effect.runPromise(service.initialize());
 
     await vi.waitFor(() => expect(client.bootstrap).toHaveBeenCalledOnce());
     expect(await testDb.db.select().from(syncOutbox)).toHaveLength(1);
     await auth.logoutForTest();
-    expect(bootstrapState.signal?.aborted).toBe(true);
+    expect(bootstrapState.interrupted).toBe(true);
     expect(await testDb.db.select().from(syncClientState)).toEqual([]);
     expect(await testDb.db.select().from(syncCollectionState)).toEqual([]);
     expect(await testDb.db.select().from(syncItemState)).toEqual([]);
@@ -697,12 +1805,13 @@ describe("SettingsSyncService", () => {
     ]);
 
     bootstrapState.resolve?.({
+      scopes: USER_BOOTSTRAP_SCOPES,
       collections: ["vocabulary", "snippet"],
       maxPushBatch: 100,
       maxPushBytes: 524288,
       pullLimit: 200,
     });
-    await service.shutdown();
+    await Effect.runPromise(service.shutdown());
     service = null;
 
     expect(client.push).not.toHaveBeenCalled();
@@ -712,57 +1821,61 @@ describe("SettingsSyncService", () => {
   it("sends both collection cursors on every incremental pull page", async () => {
     const syncId = "22222222-2222-4222-8222-222222222222";
     const client = {
-      bootstrap: vi.fn().mockResolvedValue({
-        collections: ["vocabulary", "snippet"] as Array<
-          "vocabulary" | "snippet"
-        >,
-        maxPushBatch: 100,
-        maxPushBytes: 524288,
-        pullLimit: 200,
-      }),
+      bootstrap: vi.fn(() =>
+        Effect.succeed({
+          scopes: USER_BOOTSTRAP_SCOPES,
+          collections: ["vocabulary", "snippet"] as Array<
+            "vocabulary" | "snippet"
+          >,
+          maxPushBatch: 100,
+          maxPushBytes: 524288,
+          pullLimit: 200,
+        }),
+      ),
       pull: vi.fn(
-        async (
+        (
           _scopeType: "user" | "org",
           _scopeId: string,
           cursors: ReadonlyArray<{
             collection: "vocabulary" | "snippet";
             cursor: number;
           }>,
-        ): Promise<SyncPullPage> => {
-          if (client.pull.mock.calls.length === 1) {
+        ) =>
+          Effect.sync((): SyncPullPage => {
+            if (client.pull.mock.calls.length === 1) {
+              return {
+                collections: [
+                  {
+                    collection: "vocabulary",
+                    items: [
+                      {
+                        collection: "vocabulary",
+                        syncId,
+                        syncVersion: 1,
+                        payload: { word: "Amical", replacement: null },
+                      },
+                    ],
+                    cursor: 1,
+                    hasMore: true,
+                  },
+                  {
+                    collection: "snippet",
+                    items: [],
+                    cursor: 0,
+                    hasMore: false,
+                  },
+                ],
+              };
+            }
             return {
-              collections: [
-                {
-                  collection: "vocabulary",
-                  items: [
-                    {
-                      collection: "vocabulary",
-                      syncId,
-                      syncVersion: 1,
-                      payload: { word: "Amical", replacement: null },
-                    },
-                  ],
-                  cursor: 1,
-                  hasMore: true,
-                },
-                {
-                  collection: "snippet",
-                  items: [],
-                  cursor: 0,
-                  hasMore: false,
-                },
-              ],
+              collections: cursors.map(({ collection, cursor }) => ({
+                collection,
+                items: [],
+                cursor,
+                hasMore: false,
+              })),
             };
-          }
-          return {
-            collections: cursors.map(({ collection, cursor }) => ({
-              collection,
-              items: [],
-              cursor,
-              hasMore: false,
-            })),
-          };
-        },
+          }),
       ),
       push: vi.fn(),
     };
@@ -770,7 +1883,7 @@ describe("SettingsSyncService", () => {
       auth as unknown as AuthService,
       client,
     );
-    await service.initialize();
+    await Effect.runPromise(service.initialize());
 
     await vi.waitFor(() => expect(client.pull).toHaveBeenCalledTimes(2));
     expect(client.pull.mock.calls[0][2]).toEqual([
@@ -792,47 +1905,59 @@ describe("SettingsSyncService", () => {
       } as unknown as BrowserWindow,
     ]);
     const client = {
-      bootstrap: vi.fn().mockResolvedValue({
-        collections: ["vocabulary", "snippet"] as Array<
-          "vocabulary" | "snippet"
-        >,
-        maxPushBatch: 100,
-        maxPushBytes: 524288,
-        pullLimit: 200,
-      }),
+      bootstrap: vi.fn(() =>
+        Effect.succeed({
+          scopes: USER_BOOTSTRAP_SCOPES,
+          collections: ["vocabulary", "snippet"] as Array<
+            "vocabulary" | "snippet"
+          >,
+          maxPushBatch: 100,
+          maxPushBytes: 524288,
+          pullLimit: 200,
+        }),
+      ),
       pull: vi
         .fn()
-        .mockResolvedValueOnce({
-          collections: [
-            {
-              collection: "vocabulary",
-              items: [
-                {
-                  collection: "vocabulary",
-                  syncId: "33333333-3333-4333-8333-333333333333",
-                  syncVersion: 1,
-                  payload: { word: "Amical", replacement: null },
-                },
-              ],
-              cursor: 1,
-              hasMore: true,
-            },
-            {
-              collection: "snippet",
-              items: [],
-              cursor: 0,
-              hasMore: false,
-            },
-          ],
-        } satisfies SyncPullPage)
-        .mockRejectedValueOnce(new Error("pull failed")),
+        .mockReturnValueOnce(
+          Effect.succeed({
+            collections: [
+              {
+                collection: "vocabulary",
+                items: [
+                  {
+                    collection: "vocabulary",
+                    syncId: "33333333-3333-4333-8333-333333333333",
+                    syncVersion: 1,
+                    payload: { word: "Amical", replacement: null },
+                  },
+                ],
+                cursor: 1,
+                hasMore: true,
+              },
+              {
+                collection: "snippet",
+                items: [],
+                cursor: 0,
+                hasMore: false,
+              },
+            ],
+          } satisfies SyncPullPage),
+        )
+        .mockReturnValueOnce(
+          Effect.fail(
+            new CloudNetworkFailure({
+              message: "pull failed",
+              cause: new Error("pull failed"),
+            }),
+          ),
+        ),
       push: vi.fn(),
     };
     service = SettingsSyncService.createForTests(
       auth as unknown as AuthService,
       client,
     );
-    await service.initialize();
+    await Effect.runPromise(service.initialize());
 
     await vi.waitFor(() => expect(client.pull).toHaveBeenCalledTimes(2));
     await vi.waitFor(() =>
@@ -840,45 +1965,140 @@ describe("SettingsSyncService", () => {
     );
   });
 
-  it("coalesces wakes so only one pull is in flight", async () => {
-    let concurrentPulls = 0;
-    let maxConcurrentPulls = 0;
-    const pullState: { release?: () => void } = {};
+  it("waits for another wake after a failed attempt", async () => {
+    const client = new InMemorySyncClient();
+    client.bootstrap
+      .mockReturnValueOnce(
+        Effect.fail(
+          new CloudNetworkFailure({
+            message: "offline",
+            cause: new Error("offline"),
+          }),
+        ),
+      )
+      .mockReturnValueOnce(
+        Effect.succeed({
+          scopes: USER_BOOTSTRAP_SCOPES,
+          collections: ["vocabulary", "snippet"],
+          maxPushBatch: 100,
+          maxPushBytes: 524288,
+          pullLimit: 200,
+        }),
+      );
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.bootstrap).toHaveBeenCalledOnce());
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(client.bootstrap).toHaveBeenCalledOnce();
+
+    service.wake();
+    await vi.waitFor(() => expect(client.bootstrap).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+  });
+
+  it("notifies renderers after logout cleanup", async () => {
+    const send = vi.fn();
+    vi.mocked(BrowserWindow.getAllWindows).mockReturnValue([
+      {
+        isDestroyed: () => false,
+        webContents: { send },
+      } as unknown as BrowserWindow,
+    ]);
+    const client = new InMemorySyncClient();
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+    send.mockClear();
+
+    await auth.logoutForTest();
+
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith("settings-sync-updated"),
+    );
+  });
+
+  it("keeps the original poll phase across token refresh", async () => {
+    vi.useFakeTimers();
+    const startedAt = Date.now();
+    const client = new InMemorySyncClient();
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+
+    const elapsed = Date.now() - startedAt;
+    await vi.advanceTimersByTimeAsync(5 * 60_000 - elapsed - 1);
+    expect(client.bootstrap).toHaveBeenCalledOnce();
+
+    auth.emit("token-refreshed", AUTH_STATE);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.bootstrap).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.bootstrap).toHaveBeenCalledTimes(3);
+  });
+
+  it("resets the edit debounce and cancels it on shutdown", async () => {
+    vi.useFakeTimers();
+    const client = new InMemorySyncClient();
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+
+    const row = await createVocabularyWord({ word: "First" });
+    await vi.advanceTimersByTimeAsync(500);
+    await updateVocabulary(row.id, { word: "Second" });
+    await vi.advanceTimersByTimeAsync(749);
+    expect(client.bootstrap).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.bootstrap).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledTimes(2));
+
+    await updateVocabulary(row.id, { word: "Pending at shutdown" });
+    await vi.advanceTimersByTimeAsync(0);
+    await Effect.runPromise(service.shutdown());
+    await vi.advanceTimersByTimeAsync(750);
+
+    expect(client.bootstrap).toHaveBeenCalledTimes(2);
+    expect(await testDb.db.select().from(syncOutbox)).toEqual([
+      expect.objectContaining({ syncId: row.id }),
+    ]);
+  });
+
+  it("interrupts a pending pull and preserves durable state on shutdown", async () => {
+    let pullInterrupted = false;
     const client = {
-      bootstrap: vi.fn().mockResolvedValue({
-        collections: ["vocabulary", "snippet"] as Array<
-          "vocabulary" | "snippet"
-        >,
-        maxPushBatch: 100,
-        maxPushBytes: 524288,
-        pullLimit: 200,
-      }),
-      pull: vi.fn(
-        async (
-          _scopeType: "user" | "org",
-          _scopeId: string,
-          cursors: ReadonlyArray<{
-            collection: "vocabulary" | "snippet";
-            cursor: number;
-          }>,
-        ): Promise<SyncPullPage> => {
-          concurrentPulls += 1;
-          maxConcurrentPulls = Math.max(maxConcurrentPulls, concurrentPulls);
-          if (client.pull.mock.calls.length === 1) {
-            await new Promise<void>((resolve) => {
-              pullState.release = resolve;
-            });
-          }
-          concurrentPulls -= 1;
-          return {
-            collections: cursors.map(({ collection, cursor }) => ({
-              collection,
-              items: [],
-              cursor,
-              hasMore: false,
-            })),
-          };
-        },
+      bootstrap: vi.fn(() =>
+        Effect.succeed({
+          scopes: USER_BOOTSTRAP_SCOPES,
+          collections: ["vocabulary", "snippet"] as Array<
+            "vocabulary" | "snippet"
+          >,
+          maxPushBatch: 100,
+          maxPushBytes: 524288,
+          pullLimit: 200,
+        }),
+      ),
+      pull: vi.fn(() =>
+        Effect.async<SyncPullPage>(() =>
+          Effect.sync(() => {
+            pullInterrupted = true;
+          }),
+        ),
       ),
       push: vi.fn(),
     };
@@ -886,7 +2106,70 @@ describe("SettingsSyncService", () => {
       auth as unknown as AuthService,
       client,
     );
-    await service.initialize();
+    await Effect.runPromise(service.initialize());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+    const row = await createVocabularyWord({ word: "Pending" });
+
+    await Effect.runPromise(service.shutdown());
+
+    expect(pullInterrupted).toBe(true);
+    expect(await testDb.db.select().from(syncClientState)).toHaveLength(1);
+    expect(await testDb.db.select().from(syncOutbox)).toEqual([
+      expect.objectContaining({ syncId: row.id }),
+    ]);
+  });
+
+  it("coalesces wakes so only one pull is in flight", async () => {
+    let concurrentPulls = 0;
+    let maxConcurrentPulls = 0;
+    const pullState: { release?: () => void } = {};
+    const client = {
+      bootstrap: vi.fn(() =>
+        Effect.succeed({
+          scopes: USER_BOOTSTRAP_SCOPES,
+          collections: ["vocabulary", "snippet"] as Array<
+            "vocabulary" | "snippet"
+          >,
+          maxPushBatch: 100,
+          maxPushBytes: 524288,
+          pullLimit: 200,
+        }),
+      ),
+      pull: vi.fn(
+        (
+          _scopeType: "user" | "org",
+          _scopeId: string,
+          cursors: ReadonlyArray<{
+            collection: "vocabulary" | "snippet";
+            cursor: number;
+          }>,
+        ) =>
+          Effect.gen(function* () {
+            concurrentPulls += 1;
+            maxConcurrentPulls = Math.max(maxConcurrentPulls, concurrentPulls);
+            if (client.pull.mock.calls.length === 1) {
+              yield* Effect.async<void>((resume) => {
+                pullState.release = () => resume(Effect.void);
+              });
+            }
+            concurrentPulls -= 1;
+            return {
+              collections: cursors.map(({ collection, cursor }) => ({
+                collection,
+                items: [],
+                cursor,
+                hasMore: false,
+              })),
+            };
+          }),
+      ),
+      push: vi.fn(),
+    };
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await Effect.runPromise(service.initialize());
 
     await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
     service.wake();
@@ -895,9 +2178,9 @@ describe("SettingsSyncService", () => {
     expect(maxConcurrentPulls).toBe(1);
 
     pullState.release?.();
-    await vi.waitFor(() =>
-      expect(client.pull.mock.calls.length).toBeGreaterThan(1),
-    );
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(client.pull).toHaveBeenCalledTimes(2);
     expect(maxConcurrentPulls).toBe(1);
   });
 });

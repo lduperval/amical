@@ -12,6 +12,7 @@ import {
 } from "drizzle-orm/sqlite-core";
 import type { RemoteConfig } from "@/types/remote-config";
 import type { HistoryRetentionPeriod } from "../constants/history-retention";
+import type { DictationActivity } from "../types/activity";
 
 // Transcriptions table
 export const transcriptions = sqliteTable(
@@ -34,6 +35,7 @@ export const transcriptions = sqliteTable(
     audioFile: text("audio_file"), // Path to the audio file
     confidence: real("confidence"), // AI confidence score (0-1)
     duration: integer("duration"), // Duration in seconds
+    audioDurationMs: integer("audio_duration_ms"),
     speechModel: text("speech_model"), // Model used for speech recognition
     formattingModel: text("formatting_model"), // Model used for formatting
     meta: text("meta", { mode: "json" }), // Additional metadata as JSON
@@ -48,38 +50,70 @@ export const transcriptions = sqliteTable(
 );
 
 // Vocabulary table
-export const vocabulary = sqliteTable("vocabulary", {
-  id: text("id")
-    .primaryKey()
-    .$defaultFn(() => crypto.randomUUID()),
-  word: text("word").notNull().unique(),
-  replacementWord: text("replacement_word"),
-  dateAdded: integer("date_added", { mode: "timestamp" })
-    .notNull()
-    .default(sql`(unixepoch())`),
-  usageCount: integer("usage_count").default(0), // How many times this word appeared in transcriptions
-  createdAt: integer("created_at", { mode: "timestamp" })
-    .notNull()
-    .default(sql`(unixepoch())`),
-  updatedAt: integer("updated_at", { mode: "timestamp" })
-    .notNull()
-    .default(sql`(unixepoch())`),
-});
+export const vocabulary = sqliteTable(
+  "vocabulary",
+  {
+    id: text("id")
+      .notNull()
+      .$defaultFn(() => crypto.randomUUID()),
+    scopeType: text("scope_type", { enum: ["user", "org"] })
+      .notNull()
+      .default("user"),
+    // Personal data keeps the existing device-local lifecycle and uses an
+    // empty scope ID. Organisation data always stores the cloud scope ID.
+    scopeId: text("scope_id").notNull().default(""),
+    word: text("word").notNull(),
+    replacementWord: text("replacement_word"),
+    dateAdded: integer("date_added", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    usageCount: integer("usage_count").default(0), // How many times this word appeared in transcriptions
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [
+    primaryKey({ columns: [table.scopeType, table.scopeId, table.id] }),
+    uniqueIndex("vocabulary_scope_word_unique").on(
+      table.scopeType,
+      table.scopeId,
+      table.word,
+    ),
+  ],
+);
 
 // Snippets table — short trigger phrases that expand into longer text during dictation
-export const snippets = sqliteTable("snippets", {
-  id: text("id")
-    .primaryKey()
-    .$defaultFn(() => crypto.randomUUID()),
-  trigger: text("trigger").notNull().unique(),
-  content: text("content").notNull(),
-  createdAt: integer("created_at", { mode: "timestamp" })
-    .notNull()
-    .default(sql`(unixepoch())`),
-  updatedAt: integer("updated_at", { mode: "timestamp" })
-    .notNull()
-    .default(sql`(unixepoch())`),
-});
+export const snippets = sqliteTable(
+  "snippets",
+  {
+    id: text("id")
+      .notNull()
+      .$defaultFn(() => crypto.randomUUID()),
+    scopeType: text("scope_type", { enum: ["user", "org"] })
+      .notNull()
+      .default("user"),
+    scopeId: text("scope_id").notNull().default(""),
+    trigger: text("trigger").notNull(),
+    content: text("content").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [
+    primaryKey({ columns: [table.scopeType, table.scopeId, table.id] }),
+    uniqueIndex("snippets_scope_trigger_unique").on(
+      table.scopeType,
+      table.scopeId,
+      table.trigger,
+    ),
+  ],
+);
 
 export type SyncScopeType = "user" | "org";
 export type SyncCollection = "vocabulary" | "snippet";
@@ -98,6 +132,19 @@ export const syncClientState = sqliteTable("sync_client_state", {
   id: integer("id").primaryKey(),
   lastOutboxSequence: integer("last_outbox_sequence").notNull().default(0),
 });
+
+// The scopes advertised by the latest successful cloud bootstrap. This gives
+// local organisation CRUD a transactionally checkable capability boundary.
+export const syncScopeState = sqliteTable(
+  "sync_scope_state",
+  {
+    scopeType: text("scope_type", { enum: ["user", "org"] }).notNull(),
+    scopeId: text("scope_id").notNull(),
+    role: text("role"),
+    canWrite: integer("can_write", { mode: "boolean" }).notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.scopeType, table.scopeId] })],
+);
 
 export const syncCollectionState = sqliteTable(
   "sync_collection_state",
@@ -170,6 +217,41 @@ export const syncOutbox = sqliteTable(
     primaryKey({
       columns: [table.scopeType, table.scopeId, table.collection, table.syncId],
     }),
+  ],
+);
+
+export const activityOutbox = sqliteTable(
+  "activity_outbox",
+  {
+    activityId: text("activity_id").primaryKey(),
+    payload: text("payload", { mode: "json" })
+      .$type<DictationActivity>()
+      .notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [index("activity_outbox_created_idx").on(table.createdAt)],
+);
+
+// Singleton scan cursor over the durable transcription log. Account changes
+// reset it; newly settled rows are materialized directly without changing it.
+export const activityMaterializationState = sqliteTable(
+  "activity_materialization_state",
+  {
+    id: integer("id").primaryKey(),
+    accountId: text("account_id"),
+    transcriptionCursor: integer("transcription_cursor").notNull().default(0),
+  },
+  (table) => [
+    check(
+      "activity_materialization_state_singleton_check",
+      sql`${table.id} = 1`,
+    ),
+    check(
+      "activity_materialization_state_cursor_check",
+      sql`${table.transcriptionCursor} >= 0`,
+    ),
   ],
 );
 
@@ -250,6 +332,12 @@ export interface AppSettingsData {
       widthRatio: number;
       heightRatio: number;
     };
+    /** Centre point of the floating recording control, normalized to the
+     * current display work area so it survives display and resolution changes. */
+    widgetPosition?: {
+      xRatio: number;
+      yRatio: number;
+    };
   };
   transcription?: {
     language: string;
@@ -277,11 +365,11 @@ export interface AppSettingsData {
     pendingMicrophoneName?: string;
   };
   shortcuts?: {
-    pushToTalk?: number[];
-    toggleRecording?: number[];
-    pasteLastTranscript?: number[];
-    newNote?: number[];
-    draftMode?: number[];
+    pushToTalk?: number[][];
+    toggleRecording?: number[][];
+    pasteLastTranscript?: number[][];
+    newNote?: number[][];
+    draftMode?: number[][];
   };
 
   modelProvidersConfig?: {
@@ -495,9 +583,13 @@ export type NewVocabulary = typeof vocabulary.$inferInsert;
 export type Snippet = typeof snippets.$inferSelect;
 export type NewSnippet = typeof snippets.$inferInsert;
 export type SyncClientState = typeof syncClientState.$inferSelect;
+export type SyncScopeState = typeof syncScopeState.$inferSelect;
 export type SyncCollectionState = typeof syncCollectionState.$inferSelect;
 export type SyncItemState = typeof syncItemState.$inferSelect;
 export type SyncOutbox = typeof syncOutbox.$inferSelect;
+export type ActivityOutbox = typeof activityOutbox.$inferSelect;
+export type ActivityMaterializationState =
+  typeof activityMaterializationState.$inferSelect;
 export type Model = typeof models.$inferSelect;
 export type NewModel = typeof models.$inferInsert;
 export type AppSettings = typeof appSettings.$inferSelect;

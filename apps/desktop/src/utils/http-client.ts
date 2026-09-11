@@ -76,5 +76,6 @@ export function getUserAgent(): string {
  * its own /api/auth/* endpoints from the token endpoint.)
  */
 export function getCoreApiUrl(path: string): URL {
-  return new URL(path, process.env.CORE_API_URL || __BUNDLED_CORE_API_URL);
+  const baseUrl = process.env.CORE_API_URL || __BUNDLED_CORE_API_URL || "https://core.amical.ai";
+  return new URL(path, baseUrl);
 }

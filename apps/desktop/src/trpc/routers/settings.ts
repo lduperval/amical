@@ -21,8 +21,8 @@ const FormatterConfigSchema = z.object({
   fallbackModelId: z.string().optional(),
 });
 
-// Shortcut schema (array of keycodes)
-const SetShortcutSchema = z.object({
+// Shortcut binding schema (list of keycode chords)
+const SetShortcutBindingsSchema = z.object({
   type: z.enum([
     "pushToTalk",
     "toggleRecording",
@@ -30,7 +30,7 @@ const SetShortcutSchema = z.object({
     "newNote",
     "draftMode",
   ]),
-  shortcut: z.array(z.number()),
+  bindings: z.array(z.array(z.number().int()).min(1)),
 });
 
 // Model providers schemas
@@ -260,9 +260,9 @@ export const settingsRouter = createRouter({
     }
     return await settingsService.getShortcuts();
   }),
-  // Set individual shortcut
-  setShortcut: procedure
-    .input(SetShortcutSchema)
+  // Replace one action's shortcut bindings
+  setShortcutBindings: procedure
+    .input(SetShortcutBindingsSchema)
     .mutation(async ({ input, ctx }) => {
       const shortcutManager = ctx.services.shortcutManager;
       if (!shortcutManager) {
@@ -272,9 +272,9 @@ export const settingsRouter = createRouter({
         });
       }
 
-      const result = await shortcutManager.setShortcut(
+      const result = await shortcutManager.setShortcutBindings(
         input.type,
-        input.shortcut,
+        input.bindings,
       );
 
       if (!result.valid) {
@@ -724,7 +724,7 @@ export const settingsRouter = createRouter({
     return telemetryService?.getMachineId() ?? "";
   }),
 
-  // Get telemetry config for renderer (PostHog surveys).
+  // Get telemetry config for renderer PostHog.
   // Identity is delivered separately via api.auth.onAuthStateChange so this stays cheap to poll.
   getTelemetryConfig: procedure.query(async ({ ctx }) => {
     const telemetryService = ctx.services.telemetryService;
@@ -733,9 +733,28 @@ export const settingsRouter = createRouter({
       host: process.env.POSTHOG_HOST || __BUNDLED_POSTHOG_HOST,
       machineId: telemetryService?.getMachineId() ?? "",
       enabled: telemetryService?.isEnabled() ?? false,
+      commonProperties: telemetryService?.getCommonProperties() ?? {},
       feedbackSurveyId:
         process.env.FEEDBACK_SURVEY_ID || __BUNDLED_FEEDBACK_SURVEY_ID,
     };
+  }),
+
+  onTelemetryEnabledChange: procedure.subscription(({ ctx }) => {
+    return observable<boolean>((emit) => {
+      const telemetryService = ctx.services.telemetryService;
+      if (!telemetryService) {
+        emit.next(false);
+        return;
+      }
+
+      const onEnabledChange = (enabled: boolean) => emit.next(enabled);
+      telemetryService.on("enabled-changed", onEnabledChange);
+      emit.next(telemetryService.isEnabled());
+
+      return () => {
+        telemetryService.off("enabled-changed", onEnabledChange);
+      };
+    });
   }),
 
   // Download log file via save dialog

@@ -1,10 +1,14 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
-import { Pencil, X } from "lucide-react";
+import { Pencil, Trash2, X } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { api } from "@/trpc/react";
 import { toast } from "sonner";
-import { getKeyFromKeycode, keycodeToDisplay } from "@/utils/keycode-map";
+import {
+  getKeyFromKeycode,
+  keycodeToDisplay,
+  getKeycodeFromKeyName,
+} from "@/utils/keycode-map";
 import {
   handleActiveKeysEmission,
   initialShortcutRecordingState,
@@ -16,6 +20,7 @@ interface ShortcutInputProps {
   onChange: (value: number[]) => void;
   isRecordingShortcut?: boolean;
   onRecordingShortcutChange: (recording: boolean) => void;
+  allowUnassign: boolean;
 }
 
 const MODIFIER_KEYS = new Set([
@@ -45,6 +50,84 @@ type ValidationResult = {
 function isModifierKeycode(keycode: number): boolean {
   const name = getKeyFromKeycode(keycode);
   return name ? MODIFIER_KEYS.has(name) : false;
+}
+
+function mapDomCodeToAmicalKey(code: string): string | undefined {
+  if (code.startsWith("Key")) return code.slice(3);
+  if (code.startsWith("Digit")) return code.slice(5);
+  if (code.startsWith("F") && code.length <= 3) return code;
+
+  const map: Record<string, string> = {
+    Space: "Space",
+    Enter: "Enter",
+    NumpadEnter: "Enter",
+    Escape: "Escape",
+    Backspace: "Delete",
+    Delete: "ForwardDelete",
+    Tab: "Tab",
+    ControlLeft: "Ctrl",
+    ControlRight: "RCtrl",
+    AltLeft: "Alt",
+    AltRight: "RAlt",
+    ShiftLeft: "Shift",
+    ShiftRight: "RShift",
+    MetaLeft: "Cmd",
+    MetaRight: "RCmd",
+    OSLeft: "Cmd",
+    OSRight: "RCmd",
+    Minus: "-",
+    Equal: "=",
+    BracketLeft: "[",
+    BracketRight: "]",
+    Backslash: "\\",
+    Semicolon: ";",
+    Quote: "'",
+    Comma: ",",
+    Period: ".",
+    Slash: "/",
+    Backquote: "`",
+    ArrowUp: "Up",
+    ArrowDown: "Down",
+    ArrowLeft: "Left",
+    ArrowRight: "Right",
+  };
+  return map[code];
+}
+
+const DOM_MODIFIERS = [
+  { active: (event: KeyboardEvent) => event.ctrlKey, names: ["Ctrl", "RCtrl"] },
+  { active: (event: KeyboardEvent) => event.altKey, names: ["Alt", "RAlt"] },
+  {
+    active: (event: KeyboardEvent) => event.shiftKey,
+    names: ["Shift", "RShift"],
+  },
+  { active: (event: KeyboardEvent) => event.metaKey, names: ["Cmd", "RCmd"] },
+] as const;
+
+/**
+ * Reconcile the captured chord with the modifier snapshot carried by every DOM
+ * keyboard event. On Wayland a compositor may withhold an individual Super or
+ * modifier keydown while still reporting `metaKey`/`ctrlKey` on the next event.
+ * Reading only `event.code` therefore made capture depend on modifier order.
+ */
+export function reconcileDomModifierKeys(
+  keys: Set<number>,
+  event: KeyboardEvent,
+): void {
+  for (const modifier of DOM_MODIFIERS) {
+    const keycodes = modifier.names
+      .map((name) => getKeycodeFromKeyName(name))
+      .filter((keycode): keycode is number => keycode !== undefined);
+    const hasEitherSide = keycodes.some((keycode) => keys.has(keycode));
+
+    if (modifier.active(event)) {
+      if (!hasEitherSide && keycodes[0] !== undefined) {
+        keys.add(keycodes[0]);
+      }
+    } else {
+      for (const keycode of keycodes) keys.delete(keycode);
+    }
+  }
 }
 
 /**
@@ -82,14 +165,16 @@ function RecordingDisplay({
   activeKeys,
   onCancel,
   pressKeysText,
+  cancelLabel,
 }: {
   activeKeys: number[];
   onCancel: () => void;
   pressKeysText: string;
+  cancelLabel: string;
 }) {
   return (
     <div
-      className="inline-flex items-center gap-2 px-3 py-1 bg-muted rounded-md ring-2 ring-primary"
+      className="inline-flex items-center gap-2 rounded-md bg-primary/5 px-3 py-1 ring-2 ring-primary"
       tabIndex={0}
     >
       {activeKeys.length > 0 ? (
@@ -109,8 +194,10 @@ function RecordingDisplay({
       <Button
         variant="ghost"
         size="sm"
-        className="h-6 w-6 p-0"
+        className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
         onClick={onCancel}
+        aria-label={cancelLabel}
+        title={cancelLabel}
       >
         <X className="h-3 w-3" />
       </Button>
@@ -121,13 +208,19 @@ function RecordingDisplay({
 function ShortcutDisplay({
   value,
   onEdit,
+  unassignedText,
+  editLabel,
 }: {
   value?: number[];
   onEdit: () => void;
+  unassignedText: string;
+  editLabel: string;
 }) {
+  const hasShortcut = !!value?.length;
+
   return (
     <>
-      {!!value?.length && (
+      {hasShortcut ? (
         <div
           onClick={onEdit}
           className="flex cursor-pointer items-center gap-1"
@@ -141,12 +234,16 @@ function ShortcutDisplay({
             </kbd>
           ))}
         </div>
+      ) : (
+        <span className="text-sm text-muted-foreground">{unassignedText}</span>
       )}
       <Button
         variant="ghost"
         size="sm"
         className="h-6 w-6 p-0"
         onClick={onEdit}
+        aria-label={editLabel}
+        title={editLabel}
       >
         <Pencil className="h-3 w-3" />
       </Button>
@@ -159,6 +256,7 @@ export function ShortcutInput({
   onChange,
   isRecordingShortcut = false,
   onRecordingShortcutChange,
+  allowUnassign,
 }: ShortcutInputProps) {
   const { t } = useTranslation();
   const [activeKeys, setActiveKeys] = useState<number[]>([]);
@@ -179,12 +277,37 @@ export function ShortcutInput({
     setRecordingStateMutation.mutate(false);
   };
 
+  const handleClearShortcut = () => {
+    handleCancelRecording();
+    onChange([]);
+  };
+
+  const isLinux = window.electronAPI?.platform === "linux";
+
+  const processCompletedKeys = (completedKeys: number[]) => {
+    const result = validateShortcutFormat(completedKeys);
+
+    if (result.valid && result.shortcut) {
+      // Basic format is valid - let parent handle backend validation
+      onChange(result.shortcut);
+    } else {
+      toast.error(
+        result.error
+          ? t(result.error.key, result.error.params)
+          : t("settings.shortcuts.validation.invalidKeyCombination"),
+      );
+    }
+
+    onRecordingShortcutChange(false);
+    setRecordingStateMutation.mutate(false);
+  };
+
   // Subscribe to key events when recording. Keys held before recording
   // started (e.g. the previous chord still being released after a quick
   // re-edit) are ignored until the set drains to empty — see
   // handleActiveKeysEmission.
   api.settings.activeKeysUpdates.useSubscription(undefined, {
-    enabled: isRecordingShortcut,
+    enabled: isRecordingShortcut && !isLinux,
     onData: (keys: number[]) => {
       const { state, completedKeys } = handleActiveKeysEmission(
         recordingStateRef.current,
@@ -195,27 +318,81 @@ export function ShortcutInput({
 
       // A key was released: validate the combination held just before it
       if (completedKeys) {
-        const result = validateShortcutFormat(completedKeys);
-
-        if (result.valid && result.shortcut) {
-          // Basic format is valid - let parent handle backend validation
-          onChange(result.shortcut);
-        } else {
-          toast.error(
-            result.error
-              ? t(result.error.key, result.error.params)
-              : t("settings.shortcuts.validation.invalidKeyCombination"),
-          );
-        }
-
-        onRecordingShortcutChange(false);
-        setRecordingStateMutation.mutate(false);
+        processCompletedKeys(completedKeys);
       }
     },
     onError: (error) => {
       console.error("Error subscribing to active keys", error);
     },
   });
+
+  // On Linux, the native helper cannot capture raw key events globally due to
+  // Wayland restrictions. Instead, we capture DOM events when the input is focused.
+  useEffect(() => {
+    if (!isRecordingShortcut || !isLinux) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const keyName = mapDomCodeToAmicalKey(e.code);
+      if (!keyName) return;
+
+      const keycode = getKeycodeFromKeyName(keyName);
+      if (keycode === undefined) return;
+
+      const currentKeys = new Set(recordingStateRef.current.activeKeys);
+      currentKeys.add(keycode);
+      reconcileDomModifierKeys(currentKeys, e);
+
+      const { state, completedKeys } = handleActiveKeysEmission(
+        recordingStateRef.current,
+        Array.from(currentKeys),
+      );
+
+      recordingStateRef.current = state;
+      setActiveKeys(state.activeKeys);
+
+      if (completedKeys) {
+        processCompletedKeys(completedKeys);
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const keyName = mapDomCodeToAmicalKey(e.code);
+      if (!keyName) return;
+
+      const keycode = getKeycodeFromKeyName(keyName);
+      if (keycode === undefined) return;
+
+      const currentKeys = new Set(recordingStateRef.current.activeKeys);
+      currentKeys.delete(keycode);
+      reconcileDomModifierKeys(currentKeys, e);
+
+      const { state, completedKeys } = handleActiveKeysEmission(
+        recordingStateRef.current,
+        Array.from(currentKeys),
+      );
+
+      recordingStateRef.current = state;
+      setActiveKeys(state.activeKeys);
+
+      if (completedKeys) {
+        processCompletedKeys(completedKeys);
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("keyup", handleKeyUp);
+
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("keyup", handleKeyUp);
+    };
+  }, [isRecordingShortcut, isLinux]);
 
   // Reset state when recording starts
   useEffect(() => {
@@ -229,13 +406,33 @@ export function ShortcutInput({
     <TooltipProvider>
       <div className="inline-flex items-center gap-2">
         {isRecordingShortcut ? (
-          <RecordingDisplay
-            activeKeys={activeKeys}
-            onCancel={handleCancelRecording}
-            pressKeysText={t("settings.shortcuts.input.pressKeys")}
-          />
+          <>
+            <RecordingDisplay
+              activeKeys={activeKeys}
+              onCancel={handleCancelRecording}
+              pressKeysText={t("settings.shortcuts.input.pressKeys")}
+              cancelLabel={t("settings.shortcuts.input.cancel")}
+            />
+            {allowUnassign && !!value?.length && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 w-6 p-0 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                onClick={handleClearShortcut}
+                aria-label={t("settings.shortcuts.input.clear")}
+                title={t("settings.shortcuts.input.clear")}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            )}
+          </>
         ) : (
-          <ShortcutDisplay value={value} onEdit={handleStartRecording} />
+          <ShortcutDisplay
+            value={value}
+            onEdit={handleStartRecording}
+            unassignedText={t("settings.shortcuts.input.unassigned")}
+            editLabel={t("settings.shortcuts.input.edit")}
+          />
         )}
       </div>
     </TooltipProvider>

@@ -124,24 +124,24 @@ vi.mock("@grpc/grpc-js", () => grpcMock.module);
 
 // ---- AuthService mock ----------------------------------------------------
 
-const authMock = vi.hoisted(() => {
-  const isAuthenticated = vi.fn(async () => true);
-  const getIdToken = vi.fn(async () => "test-id-token");
+const authMock = (() => {
+  const isAuthenticated = vi.fn(() => EffectLib.succeed(true));
+  const getIdToken = vi.fn(() => EffectLib.succeed("test-id-token"));
   const refreshTokenIfNeeded = vi
-    .fn<(force?: boolean) => Promise<void>>()
-    .mockResolvedValue(undefined);
+    .fn<(force?: boolean) => EffectLib.Effect<void, unknown>>()
+    .mockReturnValue(EffectLib.void);
   return {
     instance: { isAuthenticated, getIdToken, refreshTokenIfNeeded },
     reset: () => {
       isAuthenticated.mockReset();
-      isAuthenticated.mockResolvedValue(true);
+      isAuthenticated.mockReturnValue(EffectLib.succeed(true));
       getIdToken.mockReset();
-      getIdToken.mockResolvedValue("test-id-token");
+      getIdToken.mockReturnValue(EffectLib.succeed("test-id-token"));
       refreshTokenIfNeeded.mockReset();
-      refreshTokenIfNeeded.mockResolvedValue(undefined);
+      refreshTokenIfNeeded.mockReturnValue(EffectLib.void);
     },
   };
-});
+})();
 
 vi.mock("../../src/utils/http-client", () => ({
   AMICAL_LAB_SELF_CORRECTION: "self-correction",
@@ -184,7 +184,7 @@ import { decodeWireFailure } from "../../src/pipeline/providers/transcription/cl
 import { StreamTranscribeRequest } from "../../src/pipeline/providers/transcription/gen/amical/dictation/v1/dictation";
 import { DictationErrorCodes, ErrorCodes } from "../../src/types/error";
 import {
-  AuthRequired,
+  AuthenticationRequired,
   CloudQuotaExceeded as CloudQuotaExceededVariant,
   IdleTimeout,
 } from "../../src/types/errors";
@@ -733,6 +733,7 @@ describe("AmicalCloudProvider", () => {
       await expectRejectionProjection(provider.flush(baseContext()), {
         message: "boom",
         code: ErrorCodes.INTERNAL_SERVER_ERROR,
+        tag: "ServerRejected",
         httpStatus: 500,
         uiMessage: undefined,
       });
@@ -773,7 +774,7 @@ describe("AmicalCloudProvider", () => {
     it("maps a validated FORBIDDEN code independently of its HTTP status", async () => {
       const provider = openCloudSessionWithTransport("http");
       mockFetchOnce({
-        status: 403,
+        status: 401,
         json: {
           error: {
             code: "FORBIDDEN",
@@ -793,10 +794,13 @@ describe("AmicalCloudProvider", () => {
 
       await expectRejectionProjection(provider.flush(baseContext()), {
         code: ErrorCodes.INTERNAL_SERVER_ERROR,
+        tag: "AccessForbidden",
         wireCode: DictationErrorCodes.FORBIDDEN,
-        httpStatus: 403,
+        httpStatus: 401,
         uiMessage: "Du hast keinen Zugriff auf die Cloud-Transkription.",
       });
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(authMock.instance.refreshTokenIfNeeded).not.toHaveBeenCalled();
     });
 
     it("does not trust desktop-only codes or localized text from HTTP", async () => {
@@ -877,16 +881,19 @@ describe("AmicalCloudProvider", () => {
 
       await expectRejectionProjection(provider.flush(baseContext()), {
         code: ErrorCodes.AUTH_REQUIRED,
+        tag: "AuthenticationRequired",
         httpStatus: 401,
       });
       expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(authMock.instance.refreshTokenIfNeeded).toHaveBeenCalledOnce();
+      expect(authMock.instance.refreshTokenIfNeeded).toHaveBeenCalledWith(true);
     });
 
     it("surfaces AUTH_REQUIRED when token refresh fails after 401", async () => {
       const provider = openCloudSessionWithTransport("http");
       mockFetchOnce({ status: 401, json: { error: {} } });
-      authMock.instance.refreshTokenIfNeeded.mockRejectedValueOnce(
-        new Error("refresh failed"),
+      authMock.instance.refreshTokenIfNeeded.mockReturnValueOnce(
+        EffectLib.fail(new Error("refresh failed")),
       );
       await provider.transcribe({
         audioData: audioFrame(),
@@ -895,6 +902,7 @@ describe("AmicalCloudProvider", () => {
       });
       await expectRejectionProjection(provider.flush(baseContext()), {
         code: ErrorCodes.AUTH_REQUIRED,
+        tag: "AuthenticationRequired",
         httpStatus: 401,
       });
     });
@@ -1010,11 +1018,14 @@ describe("AmicalCloudProvider", () => {
 
     it("I-51: falls back to HTTP on UNAUTHENTICATED and force-refreshes after HTTP 401", async () => {
       let token = "stale-id-token";
-      authMock.instance.getIdToken.mockImplementation(async () => token);
+      authMock.instance.getIdToken.mockImplementation(() =>
+        EffectLib.succeed(token),
+      );
       authMock.instance.refreshTokenIfNeeded.mockImplementation(
-        async (force = false) => {
-          if (force) token = "fresh-id-token";
-        },
+        (force = false) =>
+          EffectLib.sync(() => {
+            if (force) token = "fresh-id-token";
+          }),
       );
       mockFetchOnce({ status: 401, json: { error: {} } });
       mockFetchOnce({
@@ -1662,13 +1673,15 @@ describe("AmicalCloudProvider", () => {
   describe("variant passthrough", () => {
     it("a cloud variant thrown internally is not double-wrapped", async () => {
       const provider = openCloudSessionWithTransport("http");
-      authMock.instance.isAuthenticated.mockResolvedValueOnce(false);
+      authMock.instance.isAuthenticated.mockReturnValueOnce(
+        EffectLib.succeed(false),
+      );
       const promise = provider.transcribe({
         audioData: audioFrame(),
         speechProbability: 1,
         context: baseContext(),
       });
-      await expect(promise).rejects.toBeInstanceOf(AuthRequired);
+      await expect(promise).rejects.toBeInstanceOf(AuthenticationRequired);
       await expectRejectionProjection(promise, {
         code: ErrorCodes.AUTH_REQUIRED,
       });
@@ -1939,11 +1952,10 @@ describe("AmicalCloudProvider", () => {
         sessionId: "session-A",
       });
       let resolveToken!: (token: string) => void;
-      authMock.instance.getIdToken.mockImplementationOnce(
-        () =>
-          new Promise<string>((resolve) => {
-            resolveToken = resolve;
-          }),
+      authMock.instance.getIdToken.mockImplementationOnce(() =>
+        EffectLib.async<string>((resume) => {
+          resolveToken = (token) => resume(EffectLib.succeed(token));
+        }),
       );
 
       const transcribe = session.transcribe({
@@ -1970,13 +1982,11 @@ describe("AmicalCloudProvider", () => {
         sessionId: "session-A",
       });
       let releaseAuthentication!: () => void;
-      const authenticationGate = new Promise<void>((resolve) => {
-        releaseAuthentication = resolve;
-      });
-      authMock.instance.isAuthenticated.mockImplementationOnce(async () => {
-        await authenticationGate;
-        return true;
-      });
+      authMock.instance.isAuthenticated.mockImplementationOnce(() =>
+        EffectLib.async<boolean>((resume) => {
+          releaseAuthentication = () => resume(EffectLib.succeed(true));
+        }),
+      );
 
       const transcribe = session.transcribe({
         audioData: audioFrame(),
@@ -2045,11 +2055,10 @@ describe("AmicalCloudProvider", () => {
         context: baseContext(),
       });
       let resolveToken!: (token: string) => void;
-      authMock.instance.getIdToken.mockImplementationOnce(
-        () =>
-          new Promise<string>((resolve) => {
-            resolveToken = resolve;
-          }),
+      authMock.instance.getIdToken.mockImplementationOnce(() =>
+        EffectLib.async<string>((resume) => {
+          resolveToken = (token) => resume(EffectLib.succeed(token));
+        }),
       );
 
       const finalization = session.flush(baseContext());
@@ -2286,6 +2295,7 @@ describe("error characterization pins", () => {
     it("PERMISSION_DENIED projects AUTH_REQUIRED", async () => {
       const p = await settleFlushWithStatus(grpcMock.status.PERMISSION_DENIED);
       expect(p.code).toBe(ErrorCodes.AUTH_REQUIRED);
+      expect(p.tag).toBe("AccessForbidden");
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
@@ -2295,6 +2305,7 @@ describe("error characterization pins", () => {
         "Received HTTP status code 401",
       );
       expect(p.code).toBe(ErrorCodes.AUTH_REQUIRED);
+      expect(p.tag).toBe("AuthenticationRequired");
       expect(p.httpStatus).toBe(401);
       expect(fetchMock).not.toHaveBeenCalled();
     });
@@ -2314,6 +2325,7 @@ describe("error characterization pins", () => {
         "Received HTTP status code 403",
       );
       expect(p.code).toBe(ErrorCodes.AUTH_REQUIRED);
+      expect(p.tag).toBe("AccessForbidden");
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
@@ -2352,6 +2364,7 @@ describe("error characterization pins", () => {
       );
       const p = projectionOf(error);
       expect(p.code).toBe(ErrorCodes.INTERNAL_SERVER_ERROR);
+      expect(p.tag).toBe("AccessForbidden");
       expect(p.wireCode).toBe(DictationErrorCodes.FORBIDDEN);
       expect(fetchMock).not.toHaveBeenCalled();
     });
@@ -2493,6 +2506,7 @@ describe("error characterization pins", () => {
         json: { error: {} },
       });
       expect(p.code).toBe(ErrorCodes.AUTH_REQUIRED);
+      expect(p.tag).toBe("AccessForbidden");
     });
 
     it("429 without a wire code projects RATE_LIMIT_EXCEEDED", async () => {

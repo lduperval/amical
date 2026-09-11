@@ -26,8 +26,9 @@ import {
   type AppSettingsData,
 } from "./schema";
 import { dictationLanguageForLocale } from "../constants/languages";
-import { isMacOS } from "../utils/platform";
+import { isLinux, isMacOS } from "../utils/platform";
 import { MAC_KEYCODES, WINDOWS_KEYCODES } from "../utils/keycodes";
+import { LINUX_DEFAULT_SHORTCUTS } from "../utils/linux-default-shortcuts";
 import {
   CURRENT_SETTINGS_VERSION,
   migrateSettings,
@@ -41,40 +42,44 @@ const SETTINGS_ID = 1;
 const getDefaultShortcuts = () => {
   if (isMacOS()) {
     return {
-      pushToTalk: [MAC_KEYCODES.FN],
-      toggleRecording: [MAC_KEYCODES.FN, MAC_KEYCODES.SPACE],
+      pushToTalk: [[MAC_KEYCODES.FN]],
+      toggleRecording: [[MAC_KEYCODES.FN, MAC_KEYCODES.SPACE]],
       pasteLastTranscript: [
-        MAC_KEYCODES.CMD,
-        MAC_KEYCODES.CTRL,
-        MAC_KEYCODES.V,
+        [MAC_KEYCODES.CMD, MAC_KEYCODES.CTRL, MAC_KEYCODES.V],
       ],
-      newNote: [MAC_KEYCODES.CMD, MAC_KEYCODES.CTRL, MAC_KEYCODES.N],
-      draftMode: [MAC_KEYCODES.FN, MAC_KEYCODES.CTRL],
+      newNote: [[MAC_KEYCODES.CMD, MAC_KEYCODES.CTRL, MAC_KEYCODES.N]],
+      draftMode: [[MAC_KEYCODES.FN, MAC_KEYCODES.CTRL]],
+    };
+  }
+
+  if (isLinux()) {
+    return {
+      pushToTalk: [[...LINUX_DEFAULT_SHORTCUTS.pushToTalk]],
+      toggleRecording: [[...LINUX_DEFAULT_SHORTCUTS.toggleRecording]],
+      pasteLastTranscript: [[...LINUX_DEFAULT_SHORTCUTS.pasteLastTranscript]],
+      newNote: [[...LINUX_DEFAULT_SHORTCUTS.newNote]],
+      draftMode: [[...LINUX_DEFAULT_SHORTCUTS.draftMode]],
     };
   }
 
   return {
-    pushToTalk: [WINDOWS_KEYCODES.CTRL, WINDOWS_KEYCODES.WIN],
+    pushToTalk: [[WINDOWS_KEYCODES.CTRL, WINDOWS_KEYCODES.WIN]],
     toggleRecording: [
-      WINDOWS_KEYCODES.CTRL,
-      WINDOWS_KEYCODES.WIN,
-      WINDOWS_KEYCODES.SPACE,
+      [WINDOWS_KEYCODES.CTRL, WINDOWS_KEYCODES.WIN, WINDOWS_KEYCODES.SPACE],
     ],
     pasteLastTranscript: [
-      WINDOWS_KEYCODES.ALT,
-      WINDOWS_KEYCODES.SHIFT,
-      WINDOWS_KEYCODES.Z,
+      [WINDOWS_KEYCODES.ALT, WINDOWS_KEYCODES.SHIFT, WINDOWS_KEYCODES.Z],
     ],
-    newNote: [WINDOWS_KEYCODES.ALT, WINDOWS_KEYCODES.SHIFT, WINDOWS_KEYCODES.N],
+    newNote: [
+      [WINDOWS_KEYCODES.ALT, WINDOWS_KEYCODES.SHIFT, WINDOWS_KEYCODES.N],
+    ],
     // Draft is push-to-talk style, so the chord must be modifier-only — a
     // non-modifier key would be swallowed by the subset consume rule (e.g.
     // Shift+letter). Ctrl+Win+Alt is pushToTalk (Ctrl+Win) plus Alt, mirroring
     // the macOS draft = pushToTalk + modifier pattern and reusing PTT-superset
     // suppression.
     draftMode: [
-      WINDOWS_KEYCODES.CTRL,
-      WINDOWS_KEYCODES.WIN,
-      WINDOWS_KEYCODES.ALT,
+      [WINDOWS_KEYCODES.CTRL, WINDOWS_KEYCODES.WIN, WINDOWS_KEYCODES.ALT],
     ],
   };
 };

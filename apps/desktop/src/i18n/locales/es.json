@@ -3,7 +3,14 @@
     "loading": "Cargando Amical..."
   },
   "errors": {
-    "generic": "Algo salió mal. Por favor, inténtalo de nuevo."
+    "generic": "Algo salió mal. Por favor, inténtalo de nuevo.",
+    "renderer": {
+      "title": "Algo salió mal",
+      "description": "Amical encontró un error inesperado.",
+      "tryAgain": "Intentar de nuevo",
+      "reload": "Recargar ventana",
+      "supportNote": "Si esto sigue ocurriendo, contacta a soporte."
+    }
   },
   "menu": {
     "file": "Archivo",
@@ -50,13 +57,6 @@
       "completeFailed": "No se pudo completar la configuración inicial. Por favor, inténtalo de nuevo.",
       "resetSuccess": "Configuración inicial restablecida correctamente",
       "resetFailed": "No se pudo restablecer la configuración inicial"
-    },
-    "errorBoundary": {
-      "title": "Algo salió mal",
-      "description": "Ocurrió un error durante el proceso de configuración inicial. Por favor, inténtalo de nuevo.",
-      "tryAgain": "Intentar de nuevo",
-      "restart": "Reiniciar configuración inicial",
-      "supportNote": "Si esto sigue ocurriendo, contacta a soporte."
     },
     "welcome": {
       "title": "¿Cómo usarás Amical?",
@@ -847,14 +847,19 @@
         "noKeysDetected": "No se detectaron teclas",
         "tooManyKeys": "Demasiadas teclas: usa {{max}} o menos",
         "invalidKeyCombination": "Combinación de teclas no válida",
-        "alreadyAssigned": "El atajo ya está asignado a otra acción",
+        "alreadyAssigned": "El atajo ya está asignado",
         "conflictsWithSystem": "{{shortcut}} entra en conflicto con un atajo del sistema",
         "addModifier": "Agrega una tecla modificadora como Cmd, Ctrl o Fn",
         "duplicateModifierPairs": "No se pueden usar las teclas {{modifier}} izquierda y derecha juntas",
         "overlapsWithPushToTalk": "Esto se superpone con tu atajo de Pulsar para hablar y puede causar problemas"
       },
       "input": {
-        "pressKeys": "Presiona las teclas..."
+        "pressKeys": "Presiona las teclas...",
+        "unassigned": "Sin asignar",
+        "edit": "Editar atajo",
+        "clear": "Quitar atajo",
+        "cancel": "Cancelar edición",
+        "add": "Añadir atajo"
       }
     },
     "notes": {
@@ -910,6 +915,17 @@
       "title": "Vocabulario",
       "description": "Administra tu vocabulario personalizado y los reemplazos de palabras para el dictado.",
       "addButton": "Agregar palabra",
+      "scope": {
+        "label": "Ámbito del vocabulario",
+        "all": "Todo",
+        "user": "Personal",
+        "org": "Organización",
+        "personalBadge": "Personal",
+        "organizationBadge": "Organización",
+        "addOrganization": "Agregar palabra de la organización",
+        "readOnly": "El vocabulario de la organización es de solo lectura para tu rol actual.",
+        "unavailable": "No hay vocabulario de organización disponible."
+      },
       "loading": "Cargando vocabulario...",
       "empty": "No se encontraron palabras en el vocabulario. Agrega tu primera palabra para comenzar.",
       "toast": {
@@ -944,6 +960,17 @@
       "title": "Fragmentos",
       "description": "Crea disparadores cortos que se expanden en texto más largo mientras dictas.",
       "addButton": "Agregar",
+      "scope": {
+        "label": "Ámbito del fragmento",
+        "all": "Todo",
+        "user": "Personal",
+        "org": "Organización",
+        "personalBadge": "Personal",
+        "organizationBadge": "Organización",
+        "addOrganization": "Agregar fragmento de la organización",
+        "readOnly": "Los fragmentos de la organización son de solo lectura para tu rol actual.",
+        "unavailable": "No hay fragmentos de organización disponibles."
+      },
       "loading": "Cargando fragmentos...",
       "empty": "Todavía no hay fragmentos. Agrega tu primer fragmento para comenzar.",
       "noResults": "Ningún fragmento coincide con \"{{query}}\".",

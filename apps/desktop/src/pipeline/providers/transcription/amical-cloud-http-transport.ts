@@ -1,16 +1,19 @@
 import { Effect, Ref } from "effect";
 import type { TranscriptionOutput } from "../../core/pipeline-types";
 import { logger } from "../../../main/logger";
+import { retryOnceAfterAuthenticationRequired } from "../../../services/auth-retry";
 import {
   isDictationErrorCode,
   type CloudErrorResponse,
 } from "../../../types/error";
 import { variantForWireCode } from "./cloud-wire-decode";
 import {
-  AuthRequired,
+  AuthenticationRequired,
+  BadRequest,
+  CloudHttpFailure,
   CloudQuotaExceeded,
-  RateLimited,
   ServerRejected,
+  decodeCloudHttpFailure,
   type CloudError,
   type CloudMeta,
 } from "../../../types/errors";
@@ -56,11 +59,19 @@ type CloudTranscriptionResponse =
 interface TranscriptionRequest {
   audioData: Float32Array;
   vadProbs: number[];
-  isRetry?: boolean;
   enableFormatting?: boolean;
   isFinal?: boolean;
   snapshot?: ProviderRequestSnapshot;
   skills?: DictationSkill[];
+}
+
+interface ResolvedTranscriptionRequest {
+  audioData: Float32Array;
+  vadProbs: number[];
+  enableFormatting: boolean;
+  isFinal: boolean;
+  snapshot: ProviderRequestSnapshot;
+  skills: DictationSkill[] | undefined;
 }
 
 /** Owns the mechanics of the cloud HTTP route for one provider session. */
@@ -71,7 +82,7 @@ export class AmicalCloudHttpTransport {
   private readonly SAMPLE_RATE = 16000;
   private readonly HTTP_AUTO_FLUSH_SAMPLE_COUNT = 28 * this.SAMPLE_RATE;
   private readonly SPEECH_PROBABILITY_THRESHOLD = 0.2;
-  // Axis computes VAD server-side. Keep the client path available for a
+  // The cloud service computes VAD server-side. Keep the client path available for a
   // controlled re-enable without sending client probabilities by default.
   private readonly CLOUD_CLIENT_VAD_ENABLED = false;
 
@@ -311,10 +322,10 @@ export class AmicalCloudHttpTransport {
 
   /**
    * The ONE http decode: classifies an error response into its cloud
-   * variant. Branches on the RAW application code while it is still in
-   * hand, then discards unrecognized codes. The server's `ui.title` rides
-   * ungated; the localized message only with a validated code — the legacy
-   * gating, preserved.
+   * variant. Valid dictation codes take precedence over HTTP status. Unknown
+   * codes use the shared cloud status fallback and remain available as
+   * diagnostic metadata. The server's `ui.title` rides ungated; the localized
+   * display message only rides with a valid dictation code.
    */
   private decodeHttpFailure(
     response: Response,
@@ -332,6 +343,8 @@ export class AmicalCloudHttpTransport {
       wireCode: validCode,
       httpStatus: response.status,
       traceId: errorData?.traceId ?? errorData?.id,
+      requestId: errorData?.requestId,
+      localizedMessage: errorData?.localizedMessage,
       serverUi:
         errorData?.ui?.title || (validCode && errorData?.localizedMessage)
           ? {
@@ -345,18 +358,28 @@ export class AmicalCloudHttpTransport {
     if (validCode) {
       return variantForWireCode(validCode, message, meta);
     }
-    if (response.status === 401 || response.status === 403) {
-      return new AuthRequired({ message, meta });
-    }
     if (response.status === 402) {
       return new CloudQuotaExceeded({ message, meta });
     }
-    if (response.status === 429) {
-      return new RateLimited({ message, meta });
+    const decoded = decodeCloudHttpFailure({
+      status: response.status,
+      statusText: response.statusText,
+      body: errorData ? { error: errorData } : undefined,
+      fallbackMessage: message,
+      additionalMeta: meta,
+    });
+    if (decoded instanceof BadRequest || decoded instanceof CloudHttpFailure) {
+      return new ServerRejected({
+        message: decoded.message,
+        meta: {
+          ...decoded.meta,
+          wireCode: isDictationErrorCode(decoded.meta.wireCode)
+            ? decoded.meta.wireCode
+            : undefined,
+        },
+      });
     }
-    // 5xx and unclassified statuses project through ServerRejected's
-    // status arm (INTERNAL_SERVER_ERROR / UNKNOWN).
-    return new ServerRejected({ message, meta });
+    return decoded;
   }
 
   private makeTranscriptionRequestEffect(
@@ -365,18 +388,11 @@ export class AmicalCloudHttpTransport {
     const {
       audioData,
       vadProbs,
-      isRetry = false,
       enableFormatting = false,
       isFinal = false,
       snapshot,
       skills: preResolvedSkills,
     } = request;
-    const abortController = new AbortController();
-    const releaseRequest = Ref.update(this.state, (state) =>
-      state.httpAbortController === abortController
-        ? { ...state, httpAbortController: null }
-        : state,
-    );
 
     return Effect.gen(this, function* () {
       yield* this.failIfClosedEffect();
@@ -404,6 +420,74 @@ export class AmicalCloudHttpTransport {
           : undefined);
       yield* this.failIfClosedEffect();
 
+      const resolvedRequest: ResolvedTranscriptionRequest = {
+        audioData,
+        vadProbs,
+        enableFormatting,
+        isFinal,
+        snapshot: requestSnapshot,
+        skills,
+      };
+      let isRetry = false;
+      return yield* retryOnceAfterAuthenticationRequired(
+        () => {
+          const retrying = isRetry;
+          isRetry = true;
+          return this.performTranscriptionRequestEffect(
+            resolvedRequest,
+            retrying,
+          );
+        },
+        (authenticationError) =>
+          Effect.sync(() => {
+            logger.transcription.warn(
+              "Authentication required, attempting token refresh and retry",
+            );
+          }).pipe(
+            Effect.zipRight(
+              this.refreshTokenEffect(true).pipe(
+                Effect.catchAll((refreshError) =>
+                  Effect.sync(() => {
+                    logger.transcription.error(
+                      "Token refresh failed:",
+                      refreshError,
+                    );
+                  }).pipe(
+                    Effect.zipRight(
+                      Effect.fail(
+                        new AuthenticationRequired({
+                          message:
+                            "Authentication failed - please log in again",
+                          meta: authenticationError.meta,
+                        }),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Effect.zipRight(this.failIfClosedEffect()),
+          ),
+      );
+    });
+  }
+
+  private performTranscriptionRequestEffect(
+    request: ResolvedTranscriptionRequest,
+    isRetry: boolean,
+  ): CloudProviderEffect<TranscriptionOutput> {
+    const { audioData, vadProbs, enableFormatting, isFinal, snapshot, skills } =
+      request;
+    const abortController = new AbortController();
+    const releaseRequest = Ref.update(this.state, (state) =>
+      state.httpAbortController === abortController
+        ? { ...state, httpAbortController: null }
+        : state,
+    );
+
+    return Effect.gen(this, function* () {
+      yield* this.failIfClosedEffect();
+
       // Register before token lookup. Auth remains non-interruptible, but a
       // cancelled session cannot install a fetch after that lookup completes.
       yield* Ref.update(this.state, (state) => ({
@@ -421,13 +505,13 @@ export class AmicalCloudHttpTransport {
           duration,
           isRetry,
           formatting: enableFormatting,
-          sessionId: requestSnapshot.currentSessionId,
+          sessionId: snapshot.currentSessionId,
           isFinal,
         });
       });
 
       const response = yield* this.fetchTranscriptionEffect(
-        requestSnapshot,
+        snapshot,
         idToken,
         audioData,
         vadProbs,
@@ -436,57 +520,6 @@ export class AmicalCloudHttpTransport {
         skills,
         abortController.signal,
       );
-
-      if (response.status === 401) {
-        if (isRetry) {
-          const errorData = yield* this.readCloudErrorResponseEffect(response);
-          return yield* Effect.fail(
-            this.decodeHttpFailure(
-              response,
-              errorData,
-              "Cloud auth failed after retry",
-            ),
-          );
-        }
-
-        yield* Effect.sync(() => {
-          logger.transcription.warn(
-            "Got 401 response, attempting token refresh and retry",
-          );
-        });
-
-        // Force token refresh, then retry once. Retry failures should surface as
-        // their own errors instead of being collapsed into auth failure.
-        yield* this.refreshTokenEffect(true).pipe(
-          Effect.catchAll((refreshError) =>
-            Effect.gen(this, function* () {
-              yield* Effect.sync(() => {
-                logger.transcription.error(
-                  "Token refresh failed:",
-                  refreshError,
-                );
-              });
-              return yield* Effect.fail(
-                new AuthRequired({
-                  message: "Authentication failed - please log in again",
-                  meta: { httpStatus: 401 },
-                }),
-              );
-            }),
-          ),
-        );
-        yield* this.failIfClosedEffect();
-
-        return yield* this.makeTranscriptionRequestEffect({
-          audioData,
-          vadProbs,
-          isRetry: true,
-          enableFormatting,
-          isFinal,
-          skills,
-          snapshot: requestSnapshot,
-        });
-      }
 
       if (!response.ok) {
         const errorData = yield* this.readCloudErrorResponseEffect(response);

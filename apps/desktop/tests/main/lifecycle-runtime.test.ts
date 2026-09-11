@@ -196,6 +196,7 @@ describe("recording lifecycle runtime", () => {
     expect(db.stampTranscriptionDisposition).toHaveBeenCalledWith(session, {
       disposition: "success",
       text: "hello world",
+      audioDurationMs: 200,
     });
     expect(h.pastes).toEqual(["hello world"]);
     expect(h.lifecycle.getSnapshot()).toMatchObject({
@@ -271,6 +272,33 @@ describe("recording lifecycle runtime", () => {
     } finally {
       _resetDictationTraceForTests();
     }
+  });
+
+  it("the manual stop rescues PTT with a missing release and permits the next dictation", async () => {
+    const h = makeHarness();
+    const session = await h.startToRecording();
+    h.timers.fire(TUNING.pressWindowMs);
+    await h.lifecycle.handleAudioChunk(session, h.frames(0.5), false);
+    await settle();
+
+    // No setPttLevel(false): the shortcut is stuck down from the app's view.
+    await h.lifecycle.stopDictation();
+    expect(h.lifecycle.getSnapshot().projection).toMatchObject({
+      publicState: "stopping",
+      stopKind: "finalize",
+      stopOrigin: "user",
+    });
+    await h.lifecycle.handleAudioChunk(session, h.frames(0.5), true);
+    await settle();
+    expect(h.pastes).toEqual(["hello world"]);
+    expect(h.lifecycle.getSnapshot().projection.publicState).toBe("idle");
+
+    // The physical release recovery clears the held chord, so the very
+    // next press starts a new session without needing a second attempt.
+    h.lifecycle.setPttLevel(false);
+    const next = await h.startToRecording();
+    expect(next).not.toBe(session);
+    expect(h.lifecycle.getSnapshot().projection.publicState).toBe("recording");
   });
 
   it("a quick tap cancels: discard, no transcription result, no paste", async () => {
@@ -598,6 +626,7 @@ describe("recording lifecycle runtime", () => {
     expect(db.stampTranscriptionDisposition).toHaveBeenCalledWith(session, {
       disposition: "failure",
       metaPatch: { failureReason: "timeout" },
+      audioDurationMs: 200,
     });
   });
 
@@ -624,7 +653,7 @@ describe("recording lifecycle runtime", () => {
     await settle();
     expect(db.stampTranscriptionDisposition).toHaveBeenCalledWith(
       shortSession,
-      { disposition: "empty" },
+      { disposition: "empty", audioDurationMs: 200 },
     );
     expect(short.notifications).toEqual([]);
 

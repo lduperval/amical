@@ -9,13 +9,16 @@ import {
   TranscriptionOutput,
 } from "../../core/pipeline-types";
 import { logger } from "../../../main/logger";
-import type { AuthService } from "../../../services/auth-service";
+import {
+  runAuthEffect,
+  type AuthService,
+} from "../../../services/auth-service";
 import type { SettingsService } from "../../../services/settings-service";
 import type { TelemetryService } from "../../../services/telemetry-service";
 import type { CloudFallbackStage } from "../../../types/telemetry-events";
-import { DictationErrorCodes } from "../../../types/error";
+import { isDictationErrorCode } from "../../../types/error";
 import {
-  AuthRequired,
+  AuthenticationRequired,
   Cancelled,
   CloudDisposed,
   codeOf,
@@ -23,7 +26,7 @@ import {
   settleExit,
   tagOf,
   type CloudError,
-  type CloudMeta,
+  type CloudRequestMeta,
 } from "../../../types/errors";
 import { recordDefect } from "../../../main/telemetry/dictation-trace";
 import { AMICAL_LAB_SELF_CORRECTION } from "../../../utils/http-client";
@@ -47,20 +50,13 @@ import {
 const makeCloudAuthLive = (authService: AuthService) =>
   Layer.sync(CloudAuth, () => ({
     isAuthenticated: () =>
-      Effect.tryPromise({
-        try: () => authService.isAuthenticated(),
-        catch: toNetworkFailure,
-      }),
+      authService.isAuthenticated().pipe(Effect.mapError(toNetworkFailure)),
     getIdToken: () =>
-      Effect.tryPromise({
-        try: () => authService.getIdToken(),
-        catch: toNetworkFailure,
-      }),
+      authService.getIdToken().pipe(Effect.mapError(toNetworkFailure)),
     refreshTokenIfNeeded: (force = false) =>
-      Effect.tryPromise({
-        try: () => authService.refreshTokenIfNeeded(force),
-        catch: toNetworkFailure,
-      }),
+      authService
+        .refreshTokenIfNeeded(force)
+        .pipe(Effect.mapError(toNetworkFailure)),
   }));
 
 const createCloudRuntime = (config: CloudConfig, authService: AuthService) =>
@@ -90,10 +86,9 @@ type CloudRuntime = ReturnType<typeof createCloudRuntime>;
  *     back would trigger a phantom HTTP transcription right after the user
  *     tried to stop.
  *   - FORBIDDEN: the server rejected the caller outright; HTTP would reject
- *     the same credentials. The only carve-out keyed on the wire code — the
- *     rest arrive as their own error variants and are handled by tag.
+ *     the same credentials.
  */
-const metaOf = (error: CloudError): CloudMeta | undefined =>
+const metaOf = (error: CloudError): CloudRequestMeta | undefined =>
   "meta" in error ? error.meta : undefined;
 
 const shouldFallbackToHttp = (error: CloudError): boolean => {
@@ -104,15 +99,13 @@ const shouldFallbackToHttp = (error: CloudError): boolean => {
     return true;
   }
   switch (error._tag) {
-    case "AuthRequired":
+    case "AuthenticationRequired":
+    case "AccessForbidden":
     case "RateLimited":
     case "CloudQuotaExceeded":
     case "IdleTimeout":
     case "Cancelled":
       return false;
-  }
-  if (metaOf(error)?.wireCode === DictationErrorCodes.FORBIDDEN) {
-    return false;
   }
   if (metaOf(error)?.grpcStatus === GrpcStatus.CANCELLED) {
     return false;
@@ -182,7 +175,7 @@ export class AmicalCloudProvider implements TranscriptionEngine {
    */
   async warmup(): Promise<void> {
     this.assertNotDisposed();
-    await this.authService.refreshTokenIfNeeded();
+    await runAuthEffect(this.authService.refreshTokenIfNeeded());
     this.assertNotDisposed();
   }
 
@@ -553,12 +546,15 @@ class AmicalCloudSession implements TranscriptionProviderSession {
     sessionId: string | undefined,
   ): void {
     const meta = metaOf(error);
+    const applicationCode = isDictationErrorCode(meta?.wireCode)
+      ? meta.wireCode
+      : undefined;
     logger.transcription.warn(
       "Cloud transcription falling back to HTTP after gRPC failure",
       {
         errorCode: codeOf(error),
         errorTag: tagOf(error),
-        applicationCode: meta?.wireCode,
+        applicationCode,
         grpcStatus: meta?.grpcStatus,
         httpStatus: meta?.httpStatus,
         message: error.message,
@@ -569,7 +565,7 @@ class AmicalCloudSession implements TranscriptionProviderSession {
     );
     this.telemetryService?.trackCloudGrpcFallback({
       error_code: codeOf(error),
-      application_code: meta?.wireCode,
+      application_code: applicationCode,
       grpc_status: meta?.grpcStatus,
       http_status: meta?.httpStatus,
       message: error.message,
@@ -614,7 +610,7 @@ class AmicalCloudSession implements TranscriptionProviderSession {
 
       if (!isAuthenticated) {
         return yield* Effect.fail(
-          new AuthRequired({
+          new AuthenticationRequired({
             message: "Authentication required for cloud transcription",
           }),
         );

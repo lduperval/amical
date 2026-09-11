@@ -6,16 +6,20 @@ import {
   getVocabularyById,
   getVocabularyByWord,
   createVocabularyWord,
+  createOrganizationVocabularyWord,
   updateVocabulary,
+  updateOrganizationVocabulary,
   deleteVocabulary,
+  deleteOrganizationVocabulary,
   getVocabularyCount,
   searchVocabulary,
   bulkImportVocabulary,
   trackWordUsage,
   getMostUsedWords,
 } from "../../db/vocabulary";
+import { getActiveOrganizationAccess } from "../../db/sync";
 import {
-  axisSyncOptionalTextSchema,
+  cloudSyncOptionalTextSchema,
   trimmedSyncKeySchema,
 } from "../../db/sync-payload";
 
@@ -26,12 +30,13 @@ const GetVocabularySchema = z.object({
   sortBy: z.enum(["word", "dateAdded", "usageCount"]).optional(),
   sortOrder: z.enum(["asc", "desc"]).optional(),
   search: z.string().optional(),
+  scope: z.enum(["all", "user", "org"]).optional(),
 });
 
 const CreateVocabularySchema = z
   .object({
     word: trimmedSyncKeySchema,
-    replacementWord: axisSyncOptionalTextSchema.nullable().optional(),
+    replacementWord: cloudSyncOptionalTextSchema.nullable().optional(),
   })
   .refine(
     (data) => {
@@ -50,7 +55,7 @@ const CreateVocabularySchema = z
 const UpdateVocabularySchema = z
   .object({
     word: trimmedSyncKeySchema.optional(),
-    replacementWord: axisSyncOptionalTextSchema.nullable().optional(),
+    replacementWord: cloudSyncOptionalTextSchema.nullable().optional(),
   })
   .refine(
     (data) => {
@@ -83,10 +88,17 @@ export const vocabularyRouter = createRouter({
 
   // Get vocabulary count
   getVocabularyCount: procedure
-    .input(z.object({ search: z.string().optional() }))
+    .input(
+      z.object({
+        search: z.string().optional(),
+        scope: z.enum(["all", "user", "org"]).optional(),
+      }),
+    )
     .query(async ({ input }) => {
-      return await getVocabularyCount(input.search);
+      return await getVocabularyCount(input.search, input.scope);
     }),
+
+  getScopeAccess: procedure.query(async () => getActiveOrganizationAccess()),
 
   // Get vocabulary by ID
   getVocabularyById: procedure
@@ -128,6 +140,12 @@ export const vocabularyRouter = createRouter({
       return await createVocabularyWord(input);
     }),
 
+  createOrganizationVocabularyWord: procedure
+    .input(CreateVocabularySchema)
+    .mutation(async ({ input }) => {
+      return await createOrganizationVocabularyWord(input);
+    }),
+
   // Update vocabulary word
   updateVocabulary: procedure
     .input(
@@ -140,11 +158,28 @@ export const vocabularyRouter = createRouter({
       return await updateVocabulary(input.id, input.data);
     }),
 
+  updateOrganizationVocabulary: procedure
+    .input(
+      z.object({
+        id: SettingsSyncUuidSchema,
+        data: UpdateVocabularySchema,
+      }),
+    )
+    .mutation(async ({ input }) => {
+      return await updateOrganizationVocabulary(input.id, input.data);
+    }),
+
   // Delete vocabulary word
   deleteVocabulary: procedure
     .input(z.object({ id: SettingsSyncUuidSchema }))
     .mutation(async ({ input }) => {
       return await deleteVocabulary(input.id);
+    }),
+
+  deleteOrganizationVocabulary: procedure
+    .input(z.object({ id: SettingsSyncUuidSchema }))
+    .mutation(async ({ input }) => {
+      return await deleteOrganizationVocabulary(input.id);
     }),
 
   // Track word usage
