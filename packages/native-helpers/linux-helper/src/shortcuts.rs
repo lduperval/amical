@@ -52,6 +52,54 @@ struct SessionState {
     session: Option<OwnedObjectPath>,
     /// Shortcut ids the portal currently reports as held down.
     active: HashSet<String>,
+    #[cfg(feature = "uinput")]
+    release_watches: HashMap<String, crate::shortcut_release::ReleaseWatch>,
+}
+
+impl SessionState {
+    // Emit only actual edges, retaining keys shared with another active chord.
+    fn change_active(&mut self, id: &str, activated: bool) -> Option<Vec<u32>> {
+        let chord = self.chords.get(id)?;
+        let previously_held: HashSet<u32> = self
+            .active
+            .iter()
+            .filter_map(|id| self.chords.get(id))
+            .flatten()
+            .copied()
+            .collect();
+        if activated {
+            if !self.active.insert(id.to_owned()) {
+                return None;
+            }
+            Some(
+                chord
+                    .iter()
+                    .copied()
+                    .filter(|key| !previously_held.contains(key))
+                    .collect(),
+            )
+        } else {
+            if !self.active.remove(id) {
+                return None;
+            }
+            #[cfg(feature = "uinput")]
+            self.release_watches.remove(id);
+            let still_held: HashSet<u32> = self
+                .active
+                .iter()
+                .filter_map(|id| self.chords.get(id))
+                .flatten()
+                .copied()
+                .collect();
+            Some(
+                chord
+                    .iter()
+                    .copied()
+                    .filter(|key| !still_held.contains(key))
+                    .collect(),
+            )
+        }
+    }
 }
 
 pub struct ShortcutsService {
@@ -87,13 +135,16 @@ impl ShortcutsService {
                 chords: HashMap::new(),
                 session: None,
                 active: HashSet::new(),
+                #[cfg(feature = "uinput")]
+                release_watches: HashMap::new(),
             })),
             event_tx,
             token_counter: AtomicU64::new(0),
         });
 
-        service.clone().spawn_signal_listener("Activated").await?;
-        service.clone().spawn_signal_listener("Deactivated").await?;
+        service.clone().spawn_signal_listener().await?;
+        #[cfg(feature = "uinput")]
+        service.clone().spawn_release_recovery();
 
         Ok(service)
     }
@@ -130,14 +181,7 @@ Categories=Utility;\n";
     /// their identity via org.freedesktop.host.portal.Registry.Register before
     /// creating global shortcut sessions.
     async fn register_app_id(conn: &Connection) {
-        let Ok(proxy) = Proxy::new(
-            conn,
-            PORTAL_DEST,
-            PORTAL_PATH,
-            REGISTRY_IFACE,
-        )
-        .await
-        else {
+        let Ok(proxy) = Proxy::new(conn, PORTAL_DEST, PORTAL_PATH, REGISTRY_IFACE).await else {
             return;
         };
 
@@ -145,7 +189,10 @@ Categories=Utility;\n";
         let candidates = ["amical-desktop", "ai.amical.desktop", "amical"];
 
         for app_id in candidates {
-            match proxy.call_method("Register", &(app_id, &empty_options)).await {
+            match proxy
+                .call_method("Register", &(app_id, &empty_options))
+                .await
+            {
                 Ok(_) => {
                     eprintln!("[shortcuts] successfully registered app_id: {app_id}");
                     break;
@@ -163,25 +210,30 @@ Categories=Utility;\n";
     }
 
     async fn portal_proxy(&self) -> Result<Proxy<'static>, String> {
-        Proxy::new(
-            &self.conn,
-            PORTAL_DEST,
-            PORTAL_PATH,
-            GLOBAL_SHORTCUTS_IFACE,
-        )
-        .await
-        .map_err(|e| format!("portal proxy: {e}"))
+        Proxy::new(&self.conn, PORTAL_DEST, PORTAL_PATH, GLOBAL_SHORTCUTS_IFACE)
+            .await
+            .map_err(|e| format!("portal proxy: {e}"))
     }
 
-    async fn spawn_signal_listener(self: Arc<Self>, signal: &'static str) -> Result<(), String> {
+    async fn spawn_signal_listener(self: Arc<Self>) -> Result<(), String> {
         let proxy = self.portal_proxy().await?;
         let mut stream = proxy
-            .receive_signal(signal)
+            .receive_all_signals()
             .await
-            .map_err(|e| format!("subscribe {signal}: {e}"))?;
+            .map_err(|e| format!("subscribe shortcut signals: {e}"))?;
 
         tokio::spawn(async move {
             while let Some(msg) = stream.next().await {
+                // One stream preserves bus ordering across press and release.
+                // Separate tasks can process a quick release before its press.
+                let header = msg.header();
+                let Some(member) = header.member() else {
+                    continue;
+                };
+                let signal = member.as_str();
+                if signal != "Activated" && signal != "Deactivated" {
+                    continue;
+                }
                 let parsed: Result<(OwnedObjectPath, String, u64, HashMap<String, OwnedValue>), _> =
                     msg.body().deserialize();
                 let Ok((session, shortcut_id, _timestamp, _options)) = parsed else {
@@ -189,7 +241,7 @@ Categories=Utility;\n";
                 };
                 self.handle_signal(signal, session, shortcut_id).await;
             }
-            eprintln!("[shortcuts] {signal} signal stream ended");
+            eprintln!("[shortcuts] signal stream ended");
         });
 
         Ok(())
@@ -200,23 +252,50 @@ Categories=Utility;\n";
         if state.session.as_ref() != Some(&session) {
             return;
         }
-        let Some(keycodes) = state.chords.get(&shortcut_id).cloned() else {
-            return;
-        };
-
         let (event_type, activated) = match signal {
             "Activated" => ("keyDown", true),
             _ => ("keyUp", false),
         };
+        let Some(keycodes) = state.change_active(&shortcut_id, activated) else {
+            return;
+        };
+        #[cfg(feature = "uinput")]
         if activated {
-            state.active.insert(shortcut_id.clone());
-        } else {
-            state.active.remove(&shortcut_id);
+            if let Some(watch) =
+                crate::shortcut_release::ReleaseWatch::capture(&state.chords[&shortcut_id])
+            {
+                state.release_watches.insert(shortcut_id.clone(), watch);
+            } else {
+                eprintln!("[shortcuts] physical release recovery unavailable for {shortcut_id}; using portal release");
+            }
         }
-        drop(state);
 
         eprintln!("[shortcuts] {signal}: {shortcut_id}");
         self.emit_chord_events(event_type, &keycodes);
+    }
+
+    #[cfg(feature = "uinput")]
+    fn spawn_release_recovery(self: Arc<Self>) {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(25));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let mut state = self.state.lock().await;
+                let released: Vec<String> = state
+                    .release_watches
+                    .iter()
+                    .filter(|(_, watch)| watch.is_released())
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in released {
+                    if let Some(keys) = state.change_active(&id, false) {
+                        eprintln!("[shortcuts] recovered physical release: {id}");
+                        self.emit_chord_events("keyUp", &keys);
+                    }
+                }
+            }
+        });
     }
 
     /// Synthesize one key event per chord keycode. Modifier booleans reflect
@@ -283,14 +362,10 @@ Categories=Utility;\n";
             "/org/freedesktop/portal/desktop/request/{}/{}",
             self.sender_token, token
         );
-        let proxy: Proxy<'static> = Proxy::new(
-            &self.conn,
-            PORTAL_DEST,
-            request_path.clone(),
-            REQUEST_IFACE,
-        )
-        .await
-        .map_err(|e| format!("request proxy: {e}"))?;
+        let proxy: Proxy<'static> =
+            Proxy::new(&self.conn, PORTAL_DEST, request_path.clone(), REQUEST_IFACE)
+                .await
+                .map_err(|e| format!("request proxy: {e}"))?;
         let stream = proxy
             .receive_signal("Response")
             .await
@@ -328,11 +403,7 @@ Categories=Utility;\n";
         // The native side treats both groups identically (see the schema TODO
         // in set-shortcuts.ts); dedupe merged chords.
         let mut chords: Vec<Vec<u32>> = Vec::new();
-        for chord in params
-            .subset_chords
-            .into_iter()
-            .chain(params.exact_chords)
-        {
+        for chord in params.subset_chords.into_iter().chain(params.exact_chords) {
             if !chord.is_empty() && !chords.contains(&chord) {
                 chords.push(chord);
             }
@@ -341,7 +412,11 @@ Categories=Utility;\n";
         // Tear down any previous session; its bindings die with it.
         let old_session = {
             let mut state = self.state.lock().await;
-            state.active.clear();
+            for id in state.active.clone() {
+                if let Some(keys) = state.change_active(&id, false) {
+                    self.emit_chord_events("keyUp", &keys);
+                }
+            }
             state.session.take()
         };
         if let Some(session) = old_session {
@@ -427,7 +502,7 @@ Categories=Utility;\n";
         {
             let mut state = self.state.lock().await;
             state.chords = chord_map;
-            state.session = Some(session);
+            state.session = Some(session.clone());
         }
 
         // Await the bind result in the background so an approval dialog can't
@@ -442,8 +517,15 @@ Categories=Utility;\n";
                 Ok((code, _)) => {
                     eprintln!("[shortcuts] BindShortcuts denied (response code {code})");
                     let mut state = service.state.lock().await;
+                    if state.session.as_ref() != Some(&session) {
+                        return;
+                    }
+                    for id in state.active.clone() {
+                        if let Some(keys) = state.change_active(&id, false) {
+                            service.emit_chord_events("keyUp", &keys);
+                        }
+                    }
                     state.chords.clear();
-                    state.active.clear();
                 }
                 Err(e) => eprintln!("[shortcuts] {e}"),
             }
@@ -512,4 +594,55 @@ fn chord_trigger(chord: &[u32]) -> Option<String> {
     }
     trigger.push_str(&key);
     Some(trigger)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> SessionState {
+        SessionState {
+            chords: HashMap::from([
+                ("ptt".into(), vec![59, 58, 6]),
+                ("toggle".into(), vec![59, 56, 6]),
+            ]),
+            session: None,
+            active: HashSet::new(),
+            #[cfg(feature = "uinput")]
+            release_watches: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn repeats_do_not_emit_new_edges_and_recovered_release_allows_next_press() {
+        let mut state = state();
+        assert_eq!(state.change_active("ptt", true), Some(vec![59, 58, 6]));
+        for _ in 0..100 {
+            assert_eq!(state.change_active("ptt", true), None);
+        }
+        // Same transition is used for a kernel-observed release when the
+        // compositor omits Deactivated. A late portal release is harmless.
+        assert_eq!(state.change_active("ptt", false), Some(vec![59, 58, 6]));
+        assert_eq!(state.change_active("ptt", false), None);
+        assert_eq!(state.change_active("ptt", true), Some(vec![59, 58, 6]));
+    }
+
+    #[test]
+    fn overlapping_chords_do_not_release_each_others_keys() {
+        let mut state = state();
+        state.change_active("ptt", true);
+        assert_eq!(state.change_active("toggle", true), Some(vec![56]));
+        assert_eq!(state.change_active("ptt", false), Some(vec![58]));
+        assert_eq!(state.change_active("toggle", false), Some(vec![59, 56, 6]));
+        assert!(state.active.is_empty());
+    }
+
+    #[test]
+    fn shortcut_trigger_remains_configurable() {
+        assert_eq!(chord_trigger(&[59, 58, 6]).as_deref(), Some("CTRL+ALT+z"));
+        assert_eq!(
+            chord_trigger(&[56, 55, 49]).as_deref(),
+            Some("SHIFT+LOGO+space")
+        );
+    }
 }

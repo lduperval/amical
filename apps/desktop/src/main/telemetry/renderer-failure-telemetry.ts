@@ -1,6 +1,7 @@
 import { app, type BrowserWindow } from "electron";
 import type { WindowManager } from "../core/window-manager";
 import type { TelemetryService } from "../../services/telemetry-service";
+import { logger } from "../logger";
 
 type WindowSurface = "main" | "widget" | "notes" | "onboarding" | "unknown";
 
@@ -34,6 +35,7 @@ export function installRendererFailureTelemetry(
       _preloadPath: string,
       error: Error,
     ): void => {
+      logger.main.error("Renderer preload failed", { surface, error });
       telemetryService.captureException(error, {
         error_context: "renderer_preload_failed",
         runtime: "main",
@@ -48,6 +50,11 @@ export function installRendererFailureTelemetry(
       isMainFrame: boolean,
     ): void => {
       if (!isMainFrame || errorCode === -3) return;
+      logger.main.error("Renderer failed to load", {
+        surface,
+        errorCode,
+        errorDescription,
+      });
       telemetryService.captureException(
         namedError("RendererLoadError", "Renderer failed to load"),
         {
@@ -64,6 +71,7 @@ export function installRendererFailureTelemetry(
       details: Electron.RenderProcessGoneDetails,
     ): void => {
       if (details.reason === "clean-exit") return;
+      logger.main.error("Renderer process gone", { surface, ...details });
       telemetryService.captureException(
         namedError("RendererProcessGoneError", "Renderer process gone"),
         {
@@ -85,6 +93,7 @@ export function installRendererFailureTelemetry(
     details: Electron.Details,
   ): void => {
     if (details.reason === "clean-exit") return;
+    logger.main.error("Electron child process gone", details);
     telemetryService.captureException(
       namedError(
         "ElectronChildProcessGoneError",
