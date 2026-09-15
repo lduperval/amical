@@ -11,16 +11,13 @@ import { AppManager } from "./core/app-manager";
 import { isWindows } from "../utils/platform";
 import { ServiceManager } from "./managers/service-manager";
 
-// The rendering workaround runs synchronously in main.ts. Log the requested
-// mode here, once the logger is available, plus Chromium's actual feature
-// status when it reports GPU information (also covers software rendering).
+// Linux display selection runs synchronously in main.ts. Log the requested
+// rendering mode here, once the logger is available, plus Chromium's actual
+// feature status when it reports GPU information.
 if (process.platform === "linux") {
   logger.main.info("Linux rendering configured in early startup", {
-    softwareRendering: !process.argv.includes("--enable-gpu"),
+    softwareRendering: process.argv.includes("--disable-gpu"),
     ozonePlatform: app.commandLine.getSwitchValue("ozone-platform"),
-    gpuCompositingDisabled: app.commandLine.hasSwitch(
-      "disable-gpu-compositing",
-    ),
   });
   app.on("gpu-info-update", () => {
     logger.main.info("Linux GPU feature status", app.getGPUFeatureStatus());

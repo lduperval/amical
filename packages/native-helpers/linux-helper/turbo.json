@@ -3,8 +3,18 @@
   "extends": ["//"],
   "tasks": {
     "build": {
-      "inputs": ["src/**", "resources/**", "Cargo.toml", "Cargo.lock"],
-      "outputs": ["target/release/linux-helper", "bin/linux-helper"],
+      "inputs": [
+        "src/**",
+        "scripts/**",
+        "resources/**",
+        "Cargo.toml",
+        "Cargo.lock"
+      ],
+      "outputs": [
+        "target/variants/**/release/linux-helper",
+        "bin/linux-helper"
+      ],
+      "env": ["AMICAL_INPUT_METHOD"],
       "cache": true
     }
   }

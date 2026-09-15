@@ -116,8 +116,8 @@ Use the environment variable when building or launching from the repository:
 # Run desktop development with uinput input method
 AMICAL_INPUT_METHOD=uinput pnpm dev
 
-# Package desktop app with uinput
-AMICAL_INPUT_METHOD=uinput pnpm make:linux
+# Linux installers always package and verify the uinput helper
+pnpm make:linux
 ```
 
 Or export the environment variable:
@@ -132,7 +132,7 @@ helper must already have been compiled with `--features uinput`. A runtime flag
 cannot add support to a helper built without the feature. A uinput build uses
 uinput by default, so no runtime flag is needed after installing that build.
 
-### Method 2: Direct Cargo Build
+### Method 2: Direct Helper Build
 
 You can build the native helper directly from `packages/native-helpers/linux-helper`:
 
@@ -140,20 +140,16 @@ You can build the native helper directly from `packages/native-helpers/linux-hel
 cd packages/native-helpers/linux-helper
 
 # 1. Default build (clipboard path, no features)
-cargo build --release
-cp target/release/linux-helper bin/linux-helper
+pnpm build
 
 # 2. Build with uinput support (Option A)
-cargo build --release --features uinput
-cp target/release/linux-helper bin/linux-helper
+pnpm build:uinput
 
 # 3. Build with XTest support (Option B)
-cargo build --release --features xtest
-cp target/release/linux-helper bin/linux-helper
+node scripts/build.mjs xtest
 
 # 4. Build with GNOME extension support (Option C)
-cargo build --release --features gnome_ext
-cp target/release/linux-helper bin/linux-helper
+node scripts/build.mjs gnome_ext
 ```
 
 ---

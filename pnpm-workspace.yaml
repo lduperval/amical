@@ -4,3 +4,34 @@ packages:
   - "packages/**"
   - "!packages/**/whisper.cpp/**"
   - "!apps/www"
+
+overrides:
+  "@types/minimatch": "3.0.5"
+  "@electron/windows-sign": "2.1.0"
+
+ignoredBuiltDependencies:
+  - "@tailwindcss/oxide"
+  - "core-js-pure"
+  - "electron"
+  - "electron-winstaller"
+  - "esbuild"
+  - "keytar"
+  - "protobufjs"
+  - "sharp"
+  - "@amical/whisper-wrapper"
+  - "better-sqlite3"
+
+onlyBuiltDependencies:
+  - "@posthog/cli"
+  - "electron"
+  - "electron-winstaller"
+  - "@amical/whisper-wrapper"
+  - "macos-alias"
+  - "fs-xattr"
+  - "onnxruntime-node"
+  - "jest-worker"
+
+patchedDependencies:
+  "macos-alias@0.2.12": "patches/macos-alias@0.2.12.patch"
+  "fs-xattr@0.3.1": "patches/fs-xattr@0.3.1.patch"
+  "@electron/packager@18.4.2": "patches/electron-packager@18.4.2.patch"

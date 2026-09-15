@@ -4,8 +4,8 @@ import { showFatalStartupDialog } from "./fatal-startup-dialog";
 import { shouldUseXWaylandForFloatingWidget } from "../utils/linux-windowing";
 
 // Configure Chromium synchronously in the entry point, before loading the
-// application's dependency graph. These switches and the acceleration setting
-// must be applied before Electron initializes its display/GPU services.
+// application's dependency graph. The Ozone switch must be applied before
+// Electron initializes its display services.
 if (!started && process.platform === "linux") {
   if (
     shouldUseXWaylandForFloatingWidget({
@@ -17,12 +17,13 @@ if (!started && process.platform === "linux") {
     app.commandLine.appendSwitch("ozone-platform", "x11");
   }
 
-  if (!process.argv.includes("--enable-gpu")) {
+  // GPU compositing is the reliable path on current GNOME/XWayland systems.
+  // Forcing software rendering makes Chromium use
+  // x11_software_bitmap_presenter, which can fail XGetWindowAttributes and
+  // leave every BrowserWindow invisible even though its renderer is running.
+  // Keep software rendering available as an explicit diagnostic fallback.
+  if (process.argv.includes("--disable-gpu")) {
     app.disableHardwareAcceleration();
-    // Explicitly keep window compositing on the software path as well. This
-    // avoids GPU-backed presentation for the main window alongside the
-    // transparent floating widget on Linux/XWayland.
-    app.commandLine.appendSwitch("disable-gpu-compositing");
   }
 }
 
