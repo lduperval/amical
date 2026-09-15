@@ -42,9 +42,26 @@ describe("main entry", () => {
     vi.unstubAllEnvs();
   });
 
-  it("configures Linux software rendering before loading the app module", async () => {
+  it("configures XWayland without forcing software rendering", async () => {
     vi.spyOn(process, "platform", "get").mockReturnValue("linux");
     vi.spyOn(process, "argv", "get").mockReturnValue(["amical"]);
+    vi.stubEnv("XDG_SESSION_TYPE", "wayland");
+    const { app } = await importEntry();
+
+    expect(accelerationDisabledAtAppImport).toBe(false);
+    expect(app.disableHardwareAcceleration).not.toHaveBeenCalled();
+    expect(app.commandLine.appendSwitch).toHaveBeenCalledWith(
+      "ozone-platform",
+      "x11",
+    );
+  });
+
+  it("allows software rendering as an explicit fallback", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+    vi.spyOn(process, "argv", "get").mockReturnValue([
+      "amical",
+      "--disable-gpu",
+    ]);
     vi.stubEnv("XDG_SESSION_TYPE", "wayland");
     const { app } = await importEntry();
 
@@ -54,16 +71,12 @@ describe("main entry", () => {
       "ozone-platform",
       "x11",
     );
-    expect(app.commandLine.appendSwitch).toHaveBeenCalledWith(
-      "disable-gpu-compositing",
-    );
   });
 
-  it("preserves explicit GPU and Ozone overrides", async () => {
+  it("preserves an explicit Ozone override", async () => {
     vi.spyOn(process, "platform", "get").mockReturnValue("linux");
     vi.spyOn(process, "argv", "get").mockReturnValue([
       "amical",
-      "--enable-gpu",
       "--ozone-platform=wayland",
     ]);
     vi.stubEnv("XDG_SESSION_TYPE", "wayland");

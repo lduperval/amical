@@ -5,9 +5,11 @@
   "private": true,
   "scripts": {
     "build": "pnpm build:native",
-    "build:native": "cargo build --release && mkdir -p bin && cp target/release/linux-helper bin/linux-helper",
+    "build:native": "node scripts/build.mjs",
+    "build:uinput": "node scripts/build.mjs uinput",
     "clean": "rm -rf target bin .turbo",
-    "dev": "cargo build && mkdir -p bin && cp target/debug/linux-helper bin/linux-helper"
+    "dev": "node scripts/build.mjs --debug",
+    "verify:uinput": "node scripts/verify.mjs uinput"
   },
   "files": [
     "bin/*"
