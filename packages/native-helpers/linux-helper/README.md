@@ -9,16 +9,17 @@ stdin/stdout protocol shared with `swift-helper` (macOS) and `windows-helper`
 
 ```sh
 pnpm build        # release build into bin/linux-helper (used by packaging)
+pnpm build:uinput # isolated uinput release build into bin/linux-helper
 pnpm dev          # debug build into bin/linux-helper
 ```
 
 Requires a Rust toolchain (`rustup default stable`). No native library
 dependencies — Wayland and DBus are spoken over pure-Rust bindings.
 
-For automatic paste on GNOME Wayland, build with `cargo build --release
---features uinput` and copy `target/release/linux-helper` to `bin/linux-helper`.
-For the desktop package, run `AMICAL_INPUT_METHOD=uinput pnpm make:linux` from
-the repository root. See `../../../BUILD.md` for device permissions and testing.
+Each input-method variant uses its own directory below `target/variants`, so a
+cached build for one feature cannot be mistaken for another. Linux packaging
+builds and verifies the `uinput` variant explicitly. See `../../../BUILD.md`
+for device permissions and testing.
 
 The uinput backend creates a persistent virtual keyboard and waits for physical
 modifiers to be released before pasting. It uses Shift+Insert with both clipboard

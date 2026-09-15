@@ -38,6 +38,11 @@ struct Helper {
 
 #[tokio::main]
 async fn main() {
+    if std::env::args().any(|arg| arg == "--print-build-input-method") {
+        println!("{}", linux_helper::compile_time_method().as_str());
+        return;
+    }
+
     // Single writer task serializes all stdout lines (RPC responses and
     // unsolicited events) so they never interleave.
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
