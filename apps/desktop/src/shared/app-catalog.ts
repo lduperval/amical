@@ -77,6 +77,24 @@ export const APP_CATALOG: TargetMeta[] = [
     bundleIds: ["com.microsoft.Outlook"],
     processName: ["outlook", "olk", "microsoft outlook"],
   },
+  // Thunderbird and its Betterbird fork. On Linux the helper reports the
+  // window's WM class / Wayland app id (lower-cased) as the identifier, so
+  // the processName entries double as Linux ids; the reverse-DNS ids cover
+  // the macOS bundles and the Flatpak app ids.
+  {
+    id: "thunderbird",
+    name: "Thunderbird",
+    emoji: "📨",
+    bundleIds: ["org.mozilla.thunderbird", "org.mozilla.Thunderbird"],
+    processName: ["thunderbird"],
+  },
+  {
+    id: "betterbird",
+    name: "Betterbird",
+    emoji: "📨",
+    bundleIds: ["eu.betterbird.Betterbird"],
+    processName: ["betterbird"],
+  },
   {
     id: "spark",
     name: "Spark",
@@ -656,6 +674,8 @@ export const PRESET_APP_DEFAULTS: Partial<Record<PresetId, string[]>> = {
   email: [
     "apple-mail",
     "outlook",
+    "thunderbird",
+    "betterbird",
     "spark",
     "superhuman",
     "shortwave",

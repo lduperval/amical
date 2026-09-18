@@ -117,6 +117,25 @@ pub struct RecheckPressedKeysParams {
     pub pressed_key_codes: Vec<u32>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+/// Linux only: ask the GNOME Shell extension to keep one of Amical's own
+/// windows (matched by title) above other windows, on every workspace, at a
+/// position. Native Wayland clients cannot do any of this themselves.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceWidgetWindowParams {
+    pub title: String,
+    pub x: i32,
+    pub y: i32,
+    #[serde(default = "default_true")]
+    pub above: bool,
+    #[serde(default = "default_true")]
+    pub sticky: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Method results
 // ---------------------------------------------------------------------------
@@ -146,6 +165,41 @@ pub struct GetSelectedTextViaCopyResult {
 #[serde(rename_all = "camelCase")]
 pub struct RecheckPressedKeysResult {
     pub stale_key_codes: Vec<u32>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceWidgetWindowResult {
+    pub success: bool,
+    /// The window existed when the request arrived. The extension also
+    /// applies the placement to a later window with the same title.
+    pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Linux only: what this helper build can do on the running desktop, so the
+/// desktop can explain missing pieces instead of failing silently.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinuxIntegrationStatusResult {
+    /// Compiled/selected input method name (`clipboard`, `uinput`, ...).
+    pub input_method: String,
+    pub injection_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub injection_backend: Option<String>,
+    /// `gnome-extension`, `data-control`, or `wl-clipboard-cli`.
+    pub clipboard_backend: String,
+    /// The `wl-clipboard-cli` backend opens a transient focused window per
+    /// clipboard operation; the target application loses focus briefly.
+    pub clipboard_steals_focus: bool,
+    pub extension_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

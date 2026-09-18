@@ -51,3 +51,13 @@ if (verify.status !== 0 || actualMethod !== method) {
 }
 
 console.log(`Staged verified ${method} helper at ${stagedBinary}`);
+
+// Ship the GNOME Shell extension with every variant: the uinput build uses
+// its clipboard when present, and the gnome_ext build needs it outright.
+const pack = spawnSync(
+  process.execPath,
+  [join(helperDir, "scripts", "pack-gnome-extension.mjs")],
+  { stdio: "inherit" },
+);
+if (pack.error) throw pack.error;
+if (pack.status !== 0) process.exit(pack.status ?? 1);

@@ -20,6 +20,7 @@ mod wayland;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use linux_helper::gnome_shell::{GnomeShell, WidgetPlacement};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
@@ -28,6 +29,11 @@ use rpc::{RpcRequest, RpcResponse};
 struct Helper {
     out_tx: mpsc::UnboundedSender<String>,
     injector: Option<input::KeyInjector>,
+    clipboard: clipboard::Clipboard,
+    /// GNOME Shell extension client; None only when the session bus is gone.
+    gnome_shell: Option<Arc<GnomeShell>>,
+    /// Whether `WidgetMoved` signals are already being forwarded.
+    widget_moves_forwarded: AtomicBool,
     clipboard_lock: tokio::sync::Mutex<()>,
     shortcuts: Option<Arc<shortcuts::ShortcutsService>>,
     audio: audio::AudioService,
@@ -58,11 +64,33 @@ async fn main() {
         }
     });
 
-    let injector = match input::KeyInjector::new() {
+    let gnome_shell = match GnomeShell::connect().await {
+        Ok(shell) => Some(Arc::new(shell)),
+        Err(e) => {
+            eprintln!("[main] GNOME Shell integration unavailable: {e}");
+            None
+        }
+    };
+    if let Some(shell) = &gnome_shell {
+        match shell.status().await {
+            Some(status) => eprintln!(
+                "[main] GNOME Shell integration: available (extension v{}, GNOME Shell {}, keyboard: {})",
+                status.version, status.shell_version, status.keyboard
+            ),
+            None => eprintln!("[main] GNOME Shell integration: extension not running"),
+        }
+    }
+
+    let injector = match gnome_shell
+        .clone()
+        .ok_or_else(|| "session bus unavailable".to_string())
+        .and_then(input::KeyInjector::new)
+    {
         Ok(injector) => {
             eprintln!(
-                "[main] {} key injection ready",
-                linux_helper::current_method().as_str()
+                "[main] {} key injection ready ({})",
+                linux_helper::current_method().as_str(),
+                injector.backend_name()
             );
             Some(injector)
         }
@@ -71,6 +99,12 @@ async fn main() {
             None
         }
     };
+
+    let clipboard = clipboard::Clipboard::new(gnome_shell.clone());
+    eprintln!(
+        "[main] clipboard backend: {}",
+        clipboard.backend().await.name()
+    );
 
     let shortcuts = match shortcuts::ShortcutsService::new(out_tx.clone()).await {
         Ok(service) => Some(service),
@@ -83,6 +117,9 @@ async fn main() {
     let helper = Arc::new(Helper {
         out_tx: out_tx.clone(),
         injector,
+        clipboard,
+        gnome_shell,
+        widget_moves_forwarded: AtomicBool::new(false),
         clipboard_lock: tokio::sync::Mutex::new(()),
         shortcuts,
         audio: audio::AudioService::new(),
@@ -136,9 +173,10 @@ fn parse_params<T: serde::de::DeserializeOwned>(request: &RpcRequest) -> Result<
 async fn handle_request(helper: &Helper, request: RpcRequest) -> RpcResponse {
     let id = request.id.clone();
     match request.method.as_str() {
-        "getAccessibilityContext" => {
-            RpcResponse::success(&id, accessibility::get_accessibility_context())
-        }
+        "getAccessibilityContext" => RpcResponse::success(
+            &id,
+            accessibility::get_accessibility_context(helper.gnome_shell.as_deref()).await,
+        ),
         "getAccessibilityStatus" => {
             RpcResponse::success(&id, accessibility::get_accessibility_status())
         }
@@ -152,7 +190,13 @@ async fn handle_request(helper: &Helper, request: RpcRequest) -> RpcResponse {
         "pasteText" => match parse_params::<rpc::PasteTextParams>(&request) {
             Ok(params) => {
                 let _guard = helper.clipboard_lock.lock().await;
-                match clipboard::paste_text(params, helper.injector.clone()).await {
+                match clipboard::paste_text(
+                    params,
+                    helper.clipboard.clone(),
+                    helper.injector.clone(),
+                )
+                .await
+                {
                     Ok(result) => RpcResponse::success(&id, result),
                     Err(e) => RpcResponse::failure(&id, rpc::INTERNAL_ERROR, e),
                 }
@@ -162,7 +206,11 @@ async fn handle_request(helper: &Helper, request: RpcRequest) -> RpcResponse {
 
         "getSelectedTextViaCopy" => {
             let _guard = helper.clipboard_lock.lock().await;
-            let result = clipboard::get_selected_text_via_copy(helper.injector.clone()).await;
+            let result = clipboard::get_selected_text_via_copy(
+                helper.clipboard.clone(),
+                helper.injector.clone(),
+            )
+            .await;
             RpcResponse::success(&id, result)
         }
 
@@ -228,10 +276,108 @@ async fn handle_request(helper: &Helper, request: RpcRequest) -> RpcResponse {
             Err(response) => response,
         },
 
+        "getLinuxIntegrationStatus" => {
+            RpcResponse::success(&id, linux_integration_status(helper).await)
+        }
+
+        "placeWidgetWindow" => match parse_params::<rpc::PlaceWidgetWindowParams>(&request) {
+            Ok(params) => RpcResponse::success(&id, place_widget_window(helper, params).await),
+            Err(response) => response,
+        },
+
         unknown => RpcResponse::failure(
             &id,
             rpc::METHOD_NOT_FOUND,
             format!("Method not found: {unknown}"),
         ),
+    }
+}
+
+async fn linux_integration_status(helper: &Helper) -> rpc::LinuxIntegrationStatusResult {
+    let extension = match &helper.gnome_shell {
+        Some(shell) => shell.status().await,
+        None => None,
+    };
+    let backend = helper.clipboard.backend().await;
+    let injection_available = match &helper.injector {
+        Some(injector) => injector.available().await,
+        None => false,
+    };
+    let message = match (&helper.injector, injection_available, backend.steals_focus()) {
+        (None, _, _) => Some(
+            "Automatic paste is unavailable in this build on this desktop; the transcript is copied for manual paste.".into(),
+        ),
+        (Some(_), false, _) => Some(linux_helper::gnome_ext_missing_message().into()),
+        (Some(_), true, true) => Some(
+            "Clipboard access goes through wl-clipboard, which briefly moves focus away from the target window on every paste. Install the Amical GNOME Shell extension to avoid this.".into(),
+        ),
+        _ => None,
+    };
+    rpc::LinuxIntegrationStatusResult {
+        input_method: linux_helper::current_method().as_str().to_owned(),
+        injection_available,
+        injection_backend: helper
+            .injector
+            .as_ref()
+            .map(|injector| injector.backend_name().to_owned()),
+        clipboard_backend: backend.name().to_owned(),
+        clipboard_steals_focus: backend.steals_focus(),
+        extension_available: extension.is_some(),
+        extension_version: extension.as_ref().map(|status| status.version),
+        shell_version: extension
+            .as_ref()
+            .map(|status| status.shell_version.clone()),
+        message,
+    }
+}
+
+async fn place_widget_window(
+    helper: &Helper,
+    params: rpc::PlaceWidgetWindowParams,
+) -> rpc::PlaceWidgetWindowResult {
+    let Some(shell) = &helper.gnome_shell else {
+        return rpc::PlaceWidgetWindowResult {
+            success: false,
+            found: false,
+            message: Some("session bus unavailable".into()),
+        };
+    };
+    if !shell.available().await {
+        return rpc::PlaceWidgetWindowResult {
+            success: false,
+            found: false,
+            message: Some(linux_helper::gnome_ext_missing_message().into()),
+        };
+    }
+    match shell
+        .place_widget(WidgetPlacement {
+            title: &params.title,
+            x: params.x,
+            y: params.y,
+            above: params.above,
+            sticky: params.sticky,
+        })
+        .await
+    {
+        Ok(found) => {
+            if !helper.widget_moves_forwarded.swap(true, Ordering::Relaxed) {
+                if let Err(e) = shell.forward_widget_moves(helper.out_tx.clone()).await {
+                    eprintln!("[main] cannot forward widget moves: {e}");
+                    helper
+                        .widget_moves_forwarded
+                        .store(false, Ordering::Relaxed);
+                }
+            }
+            rpc::PlaceWidgetWindowResult {
+                success: true,
+                found,
+                message: None,
+            }
+        }
+        Err(e) => rpc::PlaceWidgetWindowResult {
+            success: false,
+            found: false,
+            message: Some(e),
+        },
     }
 }

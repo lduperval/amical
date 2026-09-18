@@ -31,6 +31,16 @@ pub mod xtest;
 #[cfg(feature = "gnome_ext")]
 pub mod gnome_ext;
 
+/// Client for the Amical GNOME Shell extension; compiled into every variant
+/// so the clipboard and the floating widget can use it whenever it is installed.
+pub mod gnome_shell;
+
+/// User-facing explanation when the GNOME Shell extension is required but
+/// not running. Shared by the injector, the status RPC and widget placement.
+pub const fn gnome_ext_missing_message() -> &'static str {
+    "The Amical GNOME Shell extension is not running. Install and enable it (see BUILD.md), log in again, then restart Amical."
+}
+
 /// Represents the active or compiled input method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMethod {

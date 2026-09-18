@@ -1,0 +1,8 @@
+{
+  "uuid": "amical@amical.ai",
+  "name": "Amical Integration",
+  "description": "Lets Amical paste dictated text, read and write the clipboard without stealing focus, and keep its floating widget on top on GNOME Wayland. Exposes a small D-Bus API at /org/gnome/Shell/Extensions/Amical.",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "url": "https://github.com/lduperval/amical",
+  "version": 1
+}
