@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { NotebookPen, Check, X, Pencil } from "lucide-react";
+import { NotebookPen, Check, X, Pencil, GripVertical } from "lucide-react";
 import { Waveform } from "@/components/Waveform";
 import type { RecordingStatus } from "@/hooks/useRecording";
 import { useFeatureFlag } from "@/hooks/useFeatureFlag";
@@ -113,6 +113,14 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
   const openNotesWindow = api.widget.openNotesWindow.useMutation();
   const dragWidget = api.widget.drag.useMutation();
   const noteWindowFeatureFlag = useFeatureFlag(NOTE_WINDOW_FEATURE_FLAG);
+  const isLinux = window.electronAPI?.platform === "linux";
+  const linuxWindowingMode = api.widget.linuxWindowingMode.useQuery(undefined, {
+    enabled: isLinux,
+    staleTime: Infinity,
+  });
+  // Native Wayland: the main process cannot move the window, so the pill
+  // carries a grip that starts a compositor-driven move (app-region drag).
+  const usesCompositorDrag = isLinux && linuxWindowingMode.data === "wayland";
 
   // Release the hover pass-through reason if the FAB unmounts mid-hover (e.g.
   // a draft review takes over the widget), so it can't pin the window
@@ -137,7 +145,6 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
   const isNoteWindowEnabled = noteWindowFeatureFlag.enabled;
   // Draft (instruct) session: show a distinct indicator while dictating + processing.
   const isDraft = recordingStatus.isDraft;
-  const isLinux = window.electronAPI?.platform === "linux";
 
   // Track when recording state changes to "recording" after a click
   useEffect(() => {
@@ -229,7 +236,7 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
   const handleDragPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     // Reserve the primary button for recording. Middle-button dragging avoids
     // accidental movement during the control's normal click interaction.
-    if (event.button !== 1) {
+    if (event.button !== 1 || usesCompositorDrag) {
       return;
     }
 
@@ -294,15 +301,24 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
   const isWidgetActive = isLinux || isRecording || isStopping || isHovered;
   const showNotesAction =
     isNoteWindowEnabled && isHovered && !isRecording && !isStopping;
+  // The compositor-drag grip adds 12px so the content keeps its width.
   const sizeClass = !isWidgetActive
     ? "h-[8px] w-[48px]"
     : showNotesAction
-      ? "h-[24px] w-[124px]"
+      ? usesCompositorDrag
+        ? "h-[24px] w-[136px]"
+        : "h-[24px] w-[124px]"
       : isRecording
-        ? "h-[24px] w-[100px]"
+        ? usesCompositorDrag
+          ? "h-[24px] w-[112px]"
+          : "h-[24px] w-[100px]"
         : isDraft
-          ? "h-[24px] w-[116px]"
-          : "h-[24px] w-[96px]";
+          ? usesCompositorDrag
+            ? "h-[24px] w-[128px]"
+            : "h-[24px] w-[116px]"
+          : usesCompositorDrag
+            ? "h-[24px] w-[108px]"
+            : "h-[24px] w-[96px]";
 
   // Function to render widget content based on state
   const renderWidgetContent = () => {
@@ -386,6 +402,15 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
     >
       {isWidgetActive && (
         <div className="flex gap-[2px] h-full w-full justify-between">
+          {usesCompositorDrag && (
+            <div
+              className="h-full w-[12px] shrink-0 flex items-center justify-center cursor-grab active:cursor-grabbing text-white/60"
+              title="Drag to move"
+              style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+            >
+              <GripVertical className="w-[10px] h-[14px]" strokeWidth={2} />
+            </div>
+          )}
           {renderWidgetContent()}
         </div>
       )}

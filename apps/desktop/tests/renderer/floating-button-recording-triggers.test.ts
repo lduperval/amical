@@ -7,6 +7,7 @@ import type { RecordingStatus } from "@/hooks/useRecording";
 
 const mocks = vi.hoisted(() => ({
   dragWidget: vi.fn(),
+  linuxWindowingMode: undefined as "x11" | "wayland" | "none" | undefined,
 }));
 
 vi.mock("@/components/Waveform", () => ({
@@ -26,6 +27,9 @@ vi.mock("@/trpc/react", () => ({
       drag: {
         useMutation: () => ({ mutate: mocks.dragWidget }),
       },
+      linuxWindowingMode: {
+        useQuery: () => ({ data: mocks.linuxWindowingMode }),
+      },
     },
   },
 }));
@@ -42,6 +46,7 @@ import { FloatingButton } from "@/renderer/widget/pages/widget/components/Floati
 
 afterEach(() => {
   vi.clearAllMocks();
+  mocks.linuxWindowingMode = undefined;
   Object.defineProperty(window, "electronAPI", {
     configurable: true,
     value: undefined,
@@ -129,6 +134,56 @@ describe("FloatingButton recording triggers", () => {
       { phase: "move", screenX: 140, screenY: 230 },
       { phase: "end", screenX: 140, screenY: 230 },
     ]);
+  });
+
+  it("offers a compositor drag grip on native Wayland instead of main-process drags", () => {
+    Object.defineProperty(window, "electronAPI", {
+      configurable: true,
+      value: { platform: "linux" },
+    });
+    mocks.linuxWindowingMode = "wayland";
+
+    render(
+      React.createElement(FloatingButton, {
+        recordingStatus: {
+          sessionId: null,
+          state: "idle",
+          mode: "ptt",
+          isDraft: false,
+          stopKind: "none",
+          stopOrigin: "none",
+        },
+        audioLevels: [],
+        startRecording: vi.fn(),
+        stopRecording: vi.fn(),
+        dismissRecording: vi.fn(),
+      }),
+    );
+
+    // The grip hands the drag to the compositor (xdg_toplevel move); the
+    // main process cannot move a native Wayland window itself.
+    // jsdom does not model the vendor property, so read what React set.
+    const grip = screen.getByTitle("Drag to move");
+    expect(
+      (grip.style as unknown as { WebkitAppRegion?: string }).WebkitAppRegion,
+    ).toBe("drag");
+
+    const button = screen.getByRole("button", { name: "Start recording" });
+    const bubble = button.parentElement?.parentElement;
+    fireEvent.pointerDown(bubble!, {
+      button: 1,
+      buttons: 4,
+      pointerId: 3,
+      screenX: 10,
+      screenY: 10,
+    });
+    fireEvent.pointerUp(bubble!, {
+      button: 1,
+      pointerId: 3,
+      screenX: 10,
+      screenY: 10,
+    });
+    expect(mocks.dragWidget).not.toHaveBeenCalled();
   });
 
   it.each(

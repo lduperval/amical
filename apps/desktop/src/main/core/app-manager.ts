@@ -1,4 +1,4 @@
-import { app, ipcMain, shell } from "electron";
+import { app, ipcMain, shell, Notification } from "electron";
 import { initializeDatabase } from "../../db";
 import { ensureSeededSkills } from "../../db/skills";
 import { logger } from "../logger";
@@ -256,10 +256,51 @@ export class AppManager {
     nativeBridge.on("helperEvent", (event: HelperEvent) => {
       if (event.type === "activeDisplayChanged") {
         this.windowManager.handleDisplayChange("foreground-window");
+      } else if (event.type === "widgetWindowMoved") {
+        // Native Wayland: the GNOME Shell extension reports where the user
+        // dragged the widget; the compositor is the only source of truth.
+        void this.windowManager.handleExternalWidgetMove(event.payload);
       }
     });
 
+    if (process.platform === "linux") {
+      this.windowManager.setLinuxWidgetPlacer({
+        place: (request) => nativeBridge.placeWidgetWindow(request),
+      });
+      void this.reportLinuxIntegrationStatus(nativeBridge);
+    }
+
     logger.main.info("Native bridge listeners connected in AppManager");
+  }
+
+  /**
+   * Log what the Linux helper can do on this desktop and tell the user when
+   * the build they installed needs the GNOME Shell extension that is not
+   * running. Paste failures repeat the reason, so this fires once.
+   */
+  private async reportLinuxIntegrationStatus(
+    nativeBridge: NativeBridge,
+  ): Promise<void> {
+    const status = await nativeBridge.getLinuxIntegrationStatus();
+    if (!status) {
+      return;
+    }
+    logger.main.info("Linux integration status", status);
+    if (status.inputMethod === "gnome_ext" && !status.extensionAvailable) {
+      logger.main.warn("GNOME Shell extension required but not running");
+      if (Notification.isSupported()) {
+        new Notification({
+          title: "Amical needs its GNOME Shell extension",
+          body:
+            status.message ??
+            "Install and enable the Amical Integration extension, log in again, then restart Amical.",
+        }).show();
+      }
+    } else if (status.clipboardStealsFocus) {
+      logger.main.warn(
+        "Clipboard access will briefly move focus away from the target window; install the Amical GNOME Shell extension to avoid it",
+      );
+    }
   }
 
   private async handleOpenNotesWindowShortcut(): Promise<void> {

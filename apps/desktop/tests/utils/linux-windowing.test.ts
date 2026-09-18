@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { getLinuxOzonePlatform } from "../../src/utils/linux-windowing";
+import {
+  getLinuxOzonePlatform,
+  getLinuxWindowingMode,
+} from "../../src/utils/linux-windowing";
 
 describe("Linux floating-widget windowing mode", () => {
   it("uses native Wayland with Electron 44", () => {
@@ -52,5 +55,23 @@ describe("Linux floating-widget windowing mode", () => {
         electronVersion: "44.3.0",
       }),
     ).toBeUndefined();
+  });
+});
+
+describe("Linux windowing mode", () => {
+  it("reports native Wayland only when the Ozone switch says so", () => {
+    expect(
+      getLinuxWindowingMode({ platform: "linux", ozonePlatform: "wayland" }),
+    ).toBe("wayland");
+    expect(
+      getLinuxWindowingMode({ platform: "linux", ozonePlatform: "x11" }),
+    ).toBe("x11");
+    // Electron's Linux default without the switch is X11/XWayland.
+    expect(
+      getLinuxWindowingMode({ platform: "linux", ozonePlatform: undefined }),
+    ).toBe("x11");
+    expect(
+      getLinuxWindowingMode({ platform: "darwin", ozonePlatform: "wayland" }),
+    ).toBe("none");
   });
 });

@@ -233,10 +233,22 @@ export function createDesktopRecordingLifecycle(deps: {
     bridge: nativeBridge
       ? {
           pasteText: async (options) => {
+            const requestedAt = Date.now();
             const result = await nativeBridge.call("pasteText", {
               transcript: options.transcript,
               preserveClipboard: options.preserveClipboard,
             });
+            if (process.platform === "linux") {
+              // Request-to-verdict time. The helper's stderr (logged by the
+              // native bridge) carries the per-step timeline: clipboard
+              // saved, transcript offered, chord sent, contents restored.
+              logger.main.info("Linux paste request settled", {
+                success: !!result?.success,
+                durationMs: Date.now() - requestedAt,
+                preserveClipboard: options.preserveClipboard,
+                transcriptLength: options.transcript.length,
+              });
+            }
             if (process.platform === "linux" && result?.success === false) {
               const message = result.message || "Automatic paste failed.";
               logger.main.warn("Linux automatic paste failed", { message });

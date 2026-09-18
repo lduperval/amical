@@ -18,6 +18,9 @@ const RPCMethodNameSchema = z.union([
   z.literal("setAllowInjectedKeys"),
   z.literal("recheckPressedKeys"),
   z.literal("getSelectedTextViaCopy"),
+  // Linux only (see the method schemas for the contract).
+  z.literal("getLinuxIntegrationStatus"),
+  z.literal("placeWidgetWindow"),
 ]);
 
 export const RpcRequestSchema = z.object({

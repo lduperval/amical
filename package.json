@@ -6,6 +6,7 @@
     "clean": "turbo run clean && rm -rf .turbo",
     "make:linux": "pnpm --filter @amical/desktop make:linux",
     "make:deb": "pnpm --filter @amical/desktop make:deb",
+    "make:linux:gnome-ext": "pnpm --filter @amical/desktop make:linux:gnome-ext",
     "dev": "turbo run dev",
     "lint": "turbo run lint",
     "format": "prettier --write \"**/*.{ts,tsx,md,json,mjs,mts,css,mdx}\"",

@@ -304,6 +304,12 @@ const BUNDLE_TO_TYPE: Record<string, AppType> = {
   "com.google.Gmail": "email",
   "com.superhuman.electron": "email",
   MailClient: "email", // eM Client (Windows) — Windows bundleIdentifier is the process name
+  // Thunderbird / Betterbird: macOS bundle ids, Flatpak app ids, and the
+  // lower-cased WM class the Linux helper reports as the identifier.
+  "org.mozilla.thunderbird": "email",
+  "eu.betterbird.betterbird": "email",
+  thunderbird: "email",
+  betterbird: "email",
   "com.tinyspeck.slackmacgap": "chat",
   "com.microsoft.teams": "chat",
   "com.facebook.archon": "chat", // Messenger

@@ -55,6 +55,12 @@ import {
   GetSelectedTextViaCopyResult,
   GetSelectedTextViaCopyResultSchema,
   AppContext,
+  GetLinuxIntegrationStatusParams,
+  GetLinuxIntegrationStatusResult,
+  GetLinuxIntegrationStatusResultSchema,
+  PlaceWidgetWindowParams,
+  PlaceWidgetWindowResult,
+  PlaceWidgetWindowResultSchema,
 } from "@amical/types";
 
 // Define the interface for RPC methods
@@ -107,6 +113,14 @@ interface RPCMethods {
     params: GetSelectedTextViaCopyParams;
     result: GetSelectedTextViaCopyResult;
   };
+  getLinuxIntegrationStatus: {
+    params: GetLinuxIntegrationStatusParams;
+    result: GetLinuxIntegrationStatusResult;
+  };
+  placeWidgetWindow: {
+    params: PlaceWidgetWindowParams;
+    result: PlaceWidgetWindowResult;
+  };
 }
 
 type PendingRpc = {
@@ -133,6 +147,8 @@ const RPC_RESULT_SCHEMAS: Record<keyof RPCMethods, ZodType> = {
   setAllowInjectedKeys: SetAllowInjectedKeysResultSchema,
   recheckPressedKeys: RecheckPressedKeysResultSchema,
   getSelectedTextViaCopy: GetSelectedTextViaCopyResultSchema,
+  getLinuxIntegrationStatus: GetLinuxIntegrationStatusResultSchema,
+  placeWidgetWindow: PlaceWidgetWindowResultSchema,
 };
 
 function normalizeAccessibilityContext(
@@ -857,6 +873,45 @@ export class NativeBridge extends EventEmitter {
         error: error instanceof Error ? error.message : String(error),
       });
       return null;
+    }
+  }
+
+  /**
+   * Linux only: what the helper can do on this desktop (key injection and
+   * clipboard backends, GNOME Shell extension). Null on other platforms or
+   * when the helper is unreachable.
+   */
+  async getLinuxIntegrationStatus(): Promise<GetLinuxIntegrationStatusResult | null> {
+    if (process.platform !== "linux") {
+      return null;
+    }
+    try {
+      return await this.call("getLinuxIntegrationStatus", {});
+    } catch (error) {
+      this.logger.warn("getLinuxIntegrationStatus failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Linux only: ask the GNOME Shell extension (through the helper) to keep
+   * one of our windows above other windows, on every workspace, at a
+   * position. Resolves with `success: false` and a reason instead of
+   * rejecting so callers can log once and carry on.
+   */
+  async placeWidgetWindow(
+    params: PlaceWidgetWindowParams,
+  ): Promise<PlaceWidgetWindowResult> {
+    try {
+      return await this.call("placeWidgetWindow", params, 4000);
+    } catch (error) {
+      return {
+        success: false,
+        found: false,
+        message: error instanceof Error ? error.message : String(error),
+      };
     }
   }
 

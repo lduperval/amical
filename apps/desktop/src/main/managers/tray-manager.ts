@@ -2,7 +2,7 @@ import { app, Tray, Menu, nativeImage } from "electron";
 import * as path from "path";
 import { logger } from "../logger";
 import type { WindowManager } from "../core/window-manager";
-import { isMacOS, isWindows } from "../../utils/platform";
+import { isLinux, isMacOS, isWindows } from "../../utils/platform";
 import { initMainI18n } from "../../i18n/main";
 
 export class TrayManager {
@@ -53,20 +53,7 @@ export class TrayManager {
     const contextMenu = Menu.buildFromTemplate([
       {
         label: t("tray.openConsole"),
-        click: async () => {
-          logger.main.info("Open console requested from tray");
-          if (this.windowManager) {
-            // During onboarding, focus the wizard instead of opening the main
-            // window beside it (same guard as activate / second-instance).
-            const onboardingWindow = this.windowManager.getOnboardingWindow();
-            if (onboardingWindow && !onboardingWindow.isDestroyed()) {
-              onboardingWindow.show();
-              onboardingWindow.focus();
-              return;
-            }
-            await this.windowManager.createOrShowMainWindow();
-          }
-        },
+        click: () => this.openConsole("tray menu"),
       },
       { type: "separator" as const },
       ...(isMacOS()
@@ -96,7 +83,42 @@ export class TrayManager {
     // Set the context menu
     this.tray.setContextMenu(contextMenu);
 
+    // Double-clicking the icon opens the console. Electron only emits
+    // "double-click" on macOS and Windows. On Linux the tray is a
+    // StatusNotifierItem: GNOME's appindicator support turns a primary-button
+    // double-click into the item's Activate call, which Electron reports as
+    // "click" (a single primary click opens the menu there, so "click" never
+    // fires for it). macOS/Windows keep single clicks for the menu.
+    if (isLinux()) {
+      this.tray.on("click", () => this.openConsole("tray activation"));
+    } else {
+      this.tray.on("double-click", () => this.openConsole("tray double-click"));
+    }
+
     logger.main.info("Tray initialized successfully");
+  }
+
+  /**
+   * Show and focus the normal Amical window, or the onboarding wizard while
+   * it is open (same guard as activate / second-instance). Never opens a
+   * second main window: createOrShowMainWindow reuses the existing one.
+   */
+  async openConsole(source: string): Promise<void> {
+    logger.main.info("Open console requested", { source });
+    if (!this.windowManager) {
+      return;
+    }
+    const onboardingWindow = this.windowManager.getOnboardingWindow();
+    if (onboardingWindow && !onboardingWindow.isDestroyed()) {
+      onboardingWindow.show();
+      onboardingWindow.focus();
+      return;
+    }
+    try {
+      await this.windowManager.createOrShowMainWindow();
+    } catch (error) {
+      logger.main.error("Failed to open console from tray", { source, error });
+    }
   }
 
   private getIconPath(): string {

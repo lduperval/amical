@@ -6,6 +6,13 @@ import { getMainFeatureFlagState } from "@/main/utils/feature-flags";
 import { NOTE_WINDOW_FEATURE_FLAG } from "@/utils/feature-flags";
 
 export const widgetRouter = createRouter({
+  // Which Linux display backend the widget window lives on. Native Wayland
+  // cannot be moved by the main process (see WindowManager); the renderer
+  // then offers a compositor-driven drag handle instead.
+  linuxWindowingMode: procedure.query(({ ctx }) =>
+    ctx.services.windowManager.getLinuxWindowingMode(),
+  ),
+
   drag: procedure
     .input(
       z.discriminatedUnion("phase", [

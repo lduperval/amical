@@ -84,6 +84,14 @@ jobs:
             cargo test --features ${{ matrix.feature }}
           fi
 
+      - name: Check and pack GNOME Shell extension
+        if: matrix.feature == 'gnome_ext'
+        working-directory: packages/native-helpers/linux-helper
+        run: |
+          node --input-type=module --check < gnome-extension/amical@amical.ai/extension.js
+          node scripts/pack-gnome-extension.mjs /tmp/amical-gnome-extension
+          test -s /tmp/amical-gnome-extension/amical@amical.ai.shell-extension.zip
+
   build_desktop:
     name: Build Desktop (${{ matrix.os }} ${{ matrix.arch }})
     needs: typecheck

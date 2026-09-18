@@ -231,6 +231,7 @@ const mockApp = {
     return paths[name] || testUserDataPath;
   }),
   getName: vi.fn(() => "Amical"),
+  getAppPath: vi.fn(() => testAppPath),
   getVersion: vi.fn(() => "0.1.0-test"),
   isPackaged: false,
   isReady: vi.fn(() => true),
@@ -402,12 +403,21 @@ const mockClipboard = {
   availableFormats: vi.fn(() => []),
 };
 
-// Mock nativeImage
+// Mock nativeImage. Images answer the queries the tray makes on them.
+const createFakeImage = () => ({
+  getSize: vi.fn(() => ({ width: 16, height: 16 })),
+  isEmpty: vi.fn(() => false),
+  setTemplateImage: vi.fn(),
+  isTemplateImage: vi.fn(() => false),
+  resize: vi.fn(function (this: unknown) {
+    return this;
+  }),
+});
 const mockNativeImage = {
-  createEmpty: vi.fn(() => ({})),
-  createFromPath: vi.fn(() => ({})),
-  createFromBuffer: vi.fn(() => ({})),
-  createFromDataURL: vi.fn(() => ({})),
+  createEmpty: vi.fn(() => createFakeImage()),
+  createFromPath: vi.fn(() => createFakeImage()),
+  createFromBuffer: vi.fn(() => createFakeImage()),
+  createFromDataURL: vi.fn(() => createFakeImage()),
 };
 
 // Mock autoUpdater (Squirrel) as an EventEmitter so tests can drive its
