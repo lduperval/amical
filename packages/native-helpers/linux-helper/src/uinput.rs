@@ -63,8 +63,11 @@ impl UInputInjector {
             .map_err(|_| "virtual keyboard lock poisoned")?;
 
         // The portal may deactivate the shortcut when just its letter is
-        // released. Check *all* physical modifiers, independent of the user's
-        // configured shortcut; never synthesize releases on physical devices.
+        // released. Wait until *no* key is held on any physical keyboard,
+        // independent of the user's configured shortcut: a chord injected
+        // while the user still holds part of their shortcut (or any other
+        // key) reaches the application as an unintended combination. Never
+        // synthesize releases on physical devices.
         let keyboards: Vec<Device> = evdev::enumerate()
             .map(|(_, device)| device)
             .filter(|device| device.name() != Some(DEVICE_NAME))
@@ -83,7 +86,7 @@ impl UInputInjector {
                     let state = keyboard
                         .get_key_state()
                         .map_err(|e| format!("cannot read keyboard modifiers: {e}"))?;
-                    if MODIFIERS.iter().any(|key| state.contains(*key)) {
+                    if state.iter().next().is_some() {
                         return Ok(false);
                     }
                 }
@@ -134,7 +137,7 @@ fn wait_for_release(
         }
         was_released = clear;
         if start.elapsed() >= timeout {
-            return Err("keyboard modifiers are still held; release them and paste the transcript from the clipboard".into());
+            return Err("keys are still held on the keyboard; release them and paste the transcript from the clipboard".into());
         }
         std::thread::sleep(poll);
     }

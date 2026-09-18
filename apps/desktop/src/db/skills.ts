@@ -13,7 +13,14 @@ export const SEED_APP_DEFAULTS: Record<string, string[]> = {
   default: [],
   personal: ["imessage", "whatsapp", "discord"],
   work: ["slack", "linear", "notion"],
-  email: ["apple-mail", "outlook", "spark", "superhuman"],
+  email: [
+    "apple-mail",
+    "outlook",
+    "thunderbird",
+    "betterbird",
+    "spark",
+    "superhuman",
+  ],
 };
 
 export const SEED_SITE_DEFAULTS: Record<string, string[]> = {

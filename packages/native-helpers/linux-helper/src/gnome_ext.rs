@@ -1,36 +1,49 @@
-//! GNOME Shell Extension key injection integration (Option C).
+//! GNOME Shell extension key injection (Option C).
 //!
-//! Interacts with a companion GNOME Shell extension via DBus or a Unix domain
-//! socket to inject keystrokes or directly insert text into the focused window.
+//! Under GNOME Wayland, Mutter refuses `zwp_virtual_keyboard_v1` to ordinary
+//! clients. The Amical GNOME Shell extension (see `gnome-extension/`) runs
+//! inside the shell and presses a fixed set of copy/paste chords on a Clutter
+//! virtual keyboard when asked over the session bus. This injector is the
+//! helper-side half of that pair; it needs no `/dev/uinput` access.
 //!
-//! Under GNOME Wayland, GNOME Mutter restricts `zwp_virtual_keyboard_v1` from
-//! unprivileged client applications. A GNOME Shell extension runs inside Mutter's
-//! process space and has full privileges to emit Clutter key events or insert
-//! text directly.
+//! The injector is constructed even when the extension is not (yet) running so
+//! the helper keeps answering; every injection re-checks availability and
+//! fails with an actionable message instead.
 
-#[cfg(feature = "gnome_ext")]
-#[derive(Debug, Default)]
+use std::sync::Arc;
+
+use crate::gnome_shell::{Chord, GnomeShell};
+
 pub struct GnomeExtInjector {
-    extension_id: String,
+    shell: Arc<GnomeShell>,
 }
 
-#[cfg(feature = "gnome_ext")]
 impl GnomeExtInjector {
-    /// Connect to the GNOME Shell extension IPC endpoint.
-    pub fn new() -> Result<Self, String> {
-        // Will check for extension availability via DBus
-        Ok(Self {
-            extension_id: "amical@amical.ai".into(),
-        })
+    pub fn new(shell: Arc<GnomeShell>) -> Self {
+        Self { shell }
     }
 
-    /// Request the GNOME Shell extension inject a key chord or paste text.
-    pub fn inject_chord(&self, mods: u32, key: u32) -> Result<(), String> {
-        eprintln!(
-            "[gnome_ext] inject_chord called (mods: {mods:#x}, key: {key}) via extension {}",
-            self.extension_id
-        );
-        // DBus call to org.gnome.Shell.Extensions.Amical
-        Ok(())
+    pub async fn available(&self) -> bool {
+        self.shell
+            .status()
+            .await
+            .is_some_and(|status| status.keyboard)
+    }
+
+    /// Press and release a chord through the extension. Only the chords in
+    /// the extension's allowlist can be expressed; anything else is refused
+    /// here before touching the bus.
+    pub async fn inject_chord(&self, mods: u32, key: u32) -> Result<(), String> {
+        let chord = Chord::from_mods_and_key(mods, key).ok_or_else(|| {
+            format!("unsupported chord for the GNOME extension: mods={mods:#x} key={key}")
+        })?;
+        match self.shell.status().await {
+            None => return Err(crate::gnome_ext_missing_message().into()),
+            Some(status) if !status.keyboard => {
+                return Err("The Amical GNOME Shell extension could not create its virtual keyboard; check `journalctl --user -f` for GNOME Shell errors.".into())
+            }
+            Some(_) => {}
+        }
+        self.shell.send_chord(chord).await
     }
 }

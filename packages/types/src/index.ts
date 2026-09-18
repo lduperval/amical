@@ -13,6 +13,8 @@ export * from "./schemas/methods/set-draft-enter-capture.js";
 export * from "./schemas/methods/set-allow-injected-keys.js";
 export * from "./schemas/methods/recheck-pressed-keys.js";
 export * from "./schemas/methods/get-selected-text-via-copy.js";
+export * from "./schemas/methods/get-linux-integration-status.js";
+export * from "./schemas/methods/place-widget-window.js";
 
 // Event Schemas
 export * from "./schemas/events/helper-events.js";
