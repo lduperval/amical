@@ -2,6 +2,26 @@
 
 This guide covers building, configuring, and testing Amical and its Linux native helper (`linux-helper`).
 
+## Rebuild this Linux fork from a fresh clone
+
+After installing the system packages listed below, clone this fork with its
+Whisper submodule and build the Debian installer:
+
+```bash
+git clone --recurse-submodules https://github.com/lduperval/amical.git
+cd amical
+corepack enable
+pnpm install --frozen-lockfile
+pnpm --filter @amical/desktop download-node
+pnpm make:linux
+```
+
+The installer is written to
+`apps/desktop/out/make/deb/x64/amical-desktop_1.12.0~beta.7_amd64.deb`.
+`pnpm install` applies the tracked Whisper patch and builds its native addon;
+`pnpm make:linux` builds and verifies the `uinput` helper. The patched
+`whisper.cpp` submodule may appear modified after installation.
+
 ---
 
 ## 1. Default Behavior
@@ -22,7 +42,7 @@ By default, building Amical without any extra flags produces the standard, unive
 ### Core Build Tools
 
 - **Node.js**: 24.x
-- **pnpm**: 10.15.0 (`corepack enable`)
+- **pnpm**: 10.34.5, pinned in `package.json` (`corepack enable`)
 - **Rust / Cargo**: 1.80+ (`rustup default stable`)
 - **CMake**: 3.20+
 - **C/C++ Compiler**: `gcc` / `g++` or `clang`

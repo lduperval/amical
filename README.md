@@ -115,7 +115,7 @@ See [BUILD.md](BUILD.md) for detailed instructions, including building the Linux
 ### Prerequisites
 
 - [Node.js](https://nodejs.org/) 24.x
-- pnpm 10.15.0 (the version pinned in `package.json`)
+- pnpm 10.34.5 (the version pinned in `package.json`)
 - CMake 3.20 or later
 - **macOS:** Xcode or the Xcode Command Line Tools with Swift 5.9 or later
   (`xcode-select --install`). Local Whisper transcription requires macOS 15 or
@@ -129,7 +129,7 @@ See [BUILD.md](BUILD.md) for detailed instructions, including building the Linux
 Clone with submodules so the Whisper sources are available:
 
 ```bash
-git clone --recurse-submodules https://github.com/amicalhq/amical.git
+git clone --recurse-submodules https://github.com/lduperval/amical.git
 cd amical
 ```
 
