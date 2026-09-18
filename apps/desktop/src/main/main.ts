@@ -1,20 +1,20 @@
 import { app } from "electron";
 import started from "electron-squirrel-startup";
 import { showFatalStartupDialog } from "./fatal-startup-dialog";
-import { shouldUseXWaylandForFloatingWidget } from "../utils/linux-windowing";
+import { getLinuxOzonePlatform } from "../utils/linux-windowing";
 
 // Configure Chromium synchronously in the entry point, before loading the
 // application's dependency graph. The Ozone switch must be applied before
 // Electron initializes its display services.
 if (!started && process.platform === "linux") {
-  if (
-    shouldUseXWaylandForFloatingWidget({
-      platform: process.platform,
-      sessionType: process.env.XDG_SESSION_TYPE,
-      argv: process.argv,
-    })
-  ) {
-    app.commandLine.appendSwitch("ozone-platform", "x11");
+  const ozonePlatform = getLinuxOzonePlatform({
+    platform: process.platform,
+    sessionType: process.env.XDG_SESSION_TYPE,
+    argv: process.argv,
+    electronVersion: process.versions.electron,
+  });
+  if (ozonePlatform) {
+    app.commandLine.appendSwitch("ozone-platform", ozonePlatform);
   }
 
   // GPU compositing is the reliable path on current GNOME/XWayland systems.

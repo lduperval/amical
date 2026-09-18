@@ -1,25 +1,30 @@
-/**
- * Native Wayland does not let Electron position windows, keep them always on
- * top, or show them without focus. Amical's floating widget needs all three,
- * so Wayland sessions use XWayland unless the user explicitly selected an
- * Ozone platform on the command line.
- */
-export function shouldUseXWaylandForFloatingWidget({
+/** Choose the Linux display backend before Electron initializes Chromium. */
+export function getLinuxOzonePlatform({
   platform,
   sessionType,
   argv,
+  electronVersion,
 }: {
   platform: NodeJS.Platform;
   sessionType: string | undefined;
   argv: string[];
-}): boolean {
-  return (
-    platform === "linux" &&
-    sessionType?.toLowerCase() === "wayland" &&
-    !argv.some(
+  electronVersion: string;
+}): "x11" | "wayland" | undefined {
+  if (
+    platform !== "linux" ||
+    sessionType?.toLowerCase() !== "wayland" ||
+    argv.some(
       (argument) =>
         argument === "--ozone-platform" ||
         argument.startsWith("--ozone-platform="),
     )
-  );
+  ) {
+    return undefined;
+  }
+
+  // Electron 44's GPU process crashes repeatedly on this GNOME/XWayland
+  // session; its native Wayland backend starts and renders. Earlier Electron
+  // versions use XWayland for reliable floating-widget positioning.
+  const major = Number.parseInt(electronVersion, 10);
+  return major >= 44 ? "wayland" : "x11";
 }
