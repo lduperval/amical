@@ -5,7 +5,11 @@ import { Pencil, Trash2, X } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { api } from "@/trpc/react";
 import { toast } from "sonner";
-import { keycodeToDisplay, sortKeycodesForDisplay, getKeycodeFromKeyName } from "@/utils/keycode-map";
+import {
+  keycodeToDisplay,
+  sortKeycodesForDisplay,
+  getKeycodeFromKeyName,
+} from "@/utils/keycode-map";
 import {
   handleActiveKeysEmission,
   initialShortcutRecordingState,
