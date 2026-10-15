@@ -284,4 +284,3 @@ app.on("activate", () => {
   }
   hasActivated = true;
 });
-

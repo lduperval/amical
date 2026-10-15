@@ -7,13 +7,11 @@ import type { RecordingStatus } from "@/hooks/useRecording";
 
 vi.mock("@/components/RippleWaveform", () => ({
   RippleWaveform: () => null,
+}));
+
 const mocks = vi.hoisted(() => ({
   dragWidget: vi.fn(),
   linuxWindowingMode: undefined as "x11" | "wayland" | "none" | undefined,
-}));
-
-vi.mock("@/components/Waveform", () => ({
-  Waveform: () => null,
 }));
 
 vi.mock("@/hooks/useFeatureFlag", () => ({
@@ -73,7 +71,7 @@ describe("FloatingButton recording triggers", () => {
           stopKind: "none",
           stopOrigin: "none",
         },
-        audioLevels: [],
+        audioLevelRef: { current: 0 },
         startRecording,
         stopRecording: vi.fn(),
         dismissRecording: vi.fn(),
@@ -100,7 +98,7 @@ describe("FloatingButton recording triggers", () => {
           stopKind: "none",
           stopOrigin: "none",
         },
-        audioLevels: [],
+        audioLevelRef: { current: 0 },
         startRecording: vi.fn(),
         stopRecording: vi.fn(),
         dismissRecording: vi.fn(),
@@ -155,7 +153,7 @@ describe("FloatingButton recording triggers", () => {
           stopKind: "none",
           stopOrigin: "none",
         },
-        audioLevels: [],
+        audioLevelRef: { current: 0 },
         startRecording: vi.fn(),
         stopRecording: vi.fn(),
         dismissRecording: vi.fn(),
@@ -248,4 +246,3 @@ describe("FloatingButton recording triggers", () => {
     },
   );
 });
-
