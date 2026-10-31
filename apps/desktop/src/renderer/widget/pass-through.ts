@@ -24,7 +24,14 @@ export const setPassThroughReason = (
   if (active) activeReasons.add(reason);
   else activeReasons.delete(reason);
   trpcClient.widget.setIgnoreMouseEvents
-    .mutate({ ignore: activeReasons.size === 0 })
+    .mutate({
+      ignore: activeReasons.size === 0,
+      // Hovering or dragging the pill must not enable the transparent area
+      // reserved for larger content above it.
+      expanded: ["toast", "draft", "error"].some((reason) =>
+        activeReasons.has(reason as PassThroughReason),
+      ),
+    })
     .catch((error) => {
       console.error("Failed to set widget mouse pass-through", error);
     });

@@ -125,6 +125,7 @@ const buildDefaultSettings = (): AppSettingsData => ({
     muteDictationSounds: false,
     autoDictateOnNewNote: false,
     preserveClipboard: true,
+    showWidgetOutline: false,
     allowInjectedKeys: false,
   },
   history: {

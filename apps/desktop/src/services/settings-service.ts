@@ -114,6 +114,7 @@ export interface AppPreferences {
   muteDictationSounds: boolean;
   autoDictateOnNewNote: boolean;
   preserveClipboard: boolean;
+  showWidgetOutline: boolean;
   allowInjectedKeys: boolean;
 }
 
@@ -501,6 +502,7 @@ export class SettingsService extends EventEmitter {
       muteDictationSounds: preferences?.muteDictationSounds ?? false,
       autoDictateOnNewNote: preferences?.autoDictateOnNewNote ?? false,
       preserveClipboard: preferences?.preserveClipboard ?? true,
+      showWidgetOutline: preferences?.showWidgetOutline ?? false,
       allowInjectedKeys: preferences?.allowInjectedKeys ?? false,
     };
   }

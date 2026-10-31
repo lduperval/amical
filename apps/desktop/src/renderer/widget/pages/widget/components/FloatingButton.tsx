@@ -91,6 +91,8 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
     screenY: number;
   } | null>(null);
 
+  const controlRef = useRef<HTMLDivElement>(null);
+  const { mutate: setControlSize } = api.widget.setControlSize.useMutation();
   const openNotesWindow = api.widget.openNotesWindow.useMutation();
   const dragWidget = api.widget.drag.useMutation();
   const noteWindowFeatureFlag = useFeatureFlag(NOTE_WINDOW_FEATURE_FLAG);
@@ -102,6 +104,23 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
   // Native Wayland: the main process cannot move the window, so the pill
   // carries a grip that starts a compositor-driven move (app-region drag).
   const usesCompositorDrag = isLinux && linuxWindowingMode.data === "wayland";
+
+  // Follow the rendered pill through hover, recording, and draft transitions.
+  // Report CSS pixels: Electron uses the same units for window dimensions.
+  useEffect(() => {
+    const control = controlRef.current;
+    if (!isLinux || !control) return;
+    const reportSize = () => {
+      const width = Math.ceil(control.getBoundingClientRect().width);
+      const height = Math.ceil(control.getBoundingClientRect().height);
+      if (width > 0 && height > 0) setControlSize({ width, height });
+    };
+    reportSize();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(reportSize);
+    observer.observe(control);
+    return () => observer.disconnect();
+  }, [isLinux, setControlSize]);
 
   // Release the hover pass-through reason if the FAB unmounts mid-hover (e.g.
   // a draft review takes over the widget), so it can't pin the window
@@ -357,6 +376,7 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
 
   return (
     <div
+      ref={controlRef}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
       onPointerDown={handleDragPointerDown}
@@ -367,11 +387,11 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
         if (event.button === 1) event.preventDefault();
       }}
       className={`
-        transition-all duration-200 ease-in-out
+        relative shrink-0 transition-all duration-200 ease-in-out
         ${sizeClass}
         bg-black/70 rounded-[24px] backdrop-blur-md ring-[1px] ring-black/60 shadow-[0px_0px_15px_0px_rgba(0,0,0,0.40)]
         before:content-[''] before:absolute before:inset-[1px] before:rounded-[23px] before:outline before:outline-white/15 before:pointer-events-none
-        mb-2 ${isDragging ? "cursor-grabbing" : "cursor-pointer"} select-none
+        ${isLinux ? "mb-[5px]" : "mb-2"} ${isDragging ? "cursor-grabbing" : "cursor-pointer"} select-none
       `}
       style={{ pointerEvents: "auto" }}
     >

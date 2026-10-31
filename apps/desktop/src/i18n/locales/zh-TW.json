@@ -568,6 +568,10 @@
         "label": "保留原有剪貼簿內容",
         "description": "貼上轉錄內容後，恢復先前在剪貼簿中的內容。"
       },
+      "widgetOutline": {
+        "label": "顯示膠囊外框",
+        "description": "在浮動小工具周圍顯示粉紅色外框與底色，以檢查其邊界。"
+      },
       "debugMode": {
         "label": "除錯模式",
         "description": "啟用詳細紀錄的功能"

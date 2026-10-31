@@ -230,6 +230,28 @@ export default function AdvancedSettingsPage() {
 
           <div className="flex items-center justify-between">
             <div>
+              <Label htmlFor="show-widget-outline">
+                {t("settings.advanced.widgetOutline.label")}
+              </Label>
+              <p className="text-sm text-muted-foreground">
+                {t("settings.advanced.widgetOutline.description")}
+              </p>
+            </div>
+            <Switch
+              id="show-widget-outline"
+              checked={preferencesQuery.data?.showWidgetOutline ?? false}
+              disabled={
+                preferencesQuery.isLoading ||
+                updatePreferencesMutation.isPending
+              }
+              onCheckedChange={(checked) =>
+                updatePreferencesMutation.mutate({ showWidgetOutline: checked })
+              }
+            />
+          </div>
+
+          <div className="flex items-center justify-between">
+            <div>
               <Label htmlFor="debug-mode">
                 {t("settings.advanced.debugMode.label")}
               </Label>

@@ -565,6 +565,10 @@
         "label": "Preserve clipboard contents",
         "description": "After pasting a transcript, restore whatever was previously on your clipboard."
       },
+      "widgetOutline": {
+        "label": "Show pill outline",
+        "description": "Show a pink outline and tint around the floating widget to inspect its bounds."
+      },
       "debugMode": {
         "label": "Debug Mode",
         "description": "Enable detailed logging"

@@ -568,6 +568,10 @@
         "label": "클립보드 내용 유지",
         "description": "받아쓴 내용을 붙여넣은 후, 이전에 클립보드에 있던 내용을 복원합니다."
       },
+      "widgetOutline": {
+        "label": "알약 윤곽선 표시",
+        "description": "플로팅 위젯에 분홍색 윤곽선과 색조를 표시하여 경계를 확인합니다."
+      },
       "debugMode": {
         "label": "디버그 모드",
         "description": "자세한 진단 기록을 남깁니다"

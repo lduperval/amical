@@ -68,7 +68,7 @@ export interface LinuxWidgetPlacer {
 export class WindowManager extends EventEmitter {
   private static readonly WIDGET_MAX_WIDTH = 640 as const;
   private static readonly WIDGET_MAX_HEIGHT = 320 as const;
-  private static readonly WIDGET_IDLE_WIDTH = 96 as const;
+  private static readonly WIDGET_LINUX_PADDING = 5 as const;
   private static readonly WIDGET_IDLE_HEIGHT = 24 as const;
   private static readonly WIDGET_BOTTOM_MARGIN = 8 as const;
   private static readonly WIDGET_LINUX_BOTTOM_CLEARANCE = 24 as const;
@@ -82,6 +82,9 @@ export class WindowManager extends EventEmitter {
   private cursorPollingInterval: NodeJS.Timeout | null = null;
   private cursorDisplayCandidateId: number | null = null;
   private widgetPosition: WidgetPosition | null = null;
+  private widgetExpanded = false;
+  // Startup fallback until the renderer reports the pill's actual dimensions.
+  private widgetControlSize = { width: 108, height: 24 };
   private widgetDragState: WidgetDragState | null = null;
   private themeListenerSetup: boolean = false;
   private linuxWindowingMode: LinuxWindowingMode = "none";
@@ -119,8 +122,24 @@ export class WindowManager extends EventEmitter {
     const inset = this.widgetEdgeInset;
     const maxWidth = Math.max(0, workArea.width - inset * 2);
     const maxHeight = Math.max(0, workArea.height - inset * 2);
-    const width = Math.min(WindowManager.WIDGET_MAX_WIDTH, maxWidth);
-    const height = Math.min(WindowManager.WIDGET_MAX_HEIGHT, maxHeight);
+    // Native Wayland does not reliably honor Electron window shapes. Keep
+    // the actual surface small so its transparent area cannot swallow clicks.
+    const compact =
+      this.usesCompositorWidgetPlacement() && !this.widgetExpanded;
+    const width = Math.min(
+      compact
+        ? this.getWidgetControlSize().width +
+            WindowManager.WIDGET_LINUX_PADDING * 2
+        : WindowManager.WIDGET_MAX_WIDTH,
+      maxWidth,
+    );
+    const height = Math.min(
+      compact
+        ? this.getWidgetControlSize().height +
+            WindowManager.WIDGET_LINUX_PADDING * 2
+        : WindowManager.WIDGET_MAX_HEIGHT,
+      maxHeight,
+    );
     const x = workArea.x + Math.round((workArea.width - width) / 2);
     // GNOME's dock is commonly configured at the bottom. Keep a visible gap
     // beyond the compositor-reported work area so the control does not look
@@ -146,8 +165,14 @@ export class WindowManager extends EventEmitter {
       y:
         bounds.y +
         bounds.height -
-        WindowManager.WIDGET_BOTTOM_MARGIN -
-        Math.round(WindowManager.WIDGET_IDLE_HEIGHT / 2),
+        (process.platform === "linux"
+          ? WindowManager.WIDGET_LINUX_PADDING
+          : WindowManager.WIDGET_BOTTOM_MARGIN) -
+        Math.round(
+          (process.platform === "linux"
+            ? this.getWidgetControlSize().height
+            : WindowManager.WIDGET_IDLE_HEIGHT) / 2,
+        ),
     };
   }
 
@@ -789,6 +814,13 @@ export class WindowManager extends EventEmitter {
       this.widgetWindow.setBounds(bounds);
       return;
     }
+    const currentBounds = this.widgetWindow.getBounds();
+    if (
+      currentBounds.width !== bounds.width ||
+      currentBounds.height !== bounds.height
+    ) {
+      this.widgetWindow.setSize(bounds.width, bounds.height);
+    }
     const placer = this.linuxWidgetPlacer;
     if (!placer) {
       this.logPlacementProblemOnce(
@@ -1146,50 +1178,78 @@ export class WindowManager extends EventEmitter {
     }
   }
 
-  setWidgetIgnoreMouseEvents(ignore: boolean): void {
+  setWidgetIgnoreMouseEvents(ignore: boolean, expanded = !ignore): void {
     if (!this.widgetWindow || this.widgetWindow.isDestroyed()) {
       return;
     }
 
     if (process.platform === "linux") {
-      // Use the window input shape for the idle state: the visible pill
-      // receives clicks directly, while the rest of this large, transparent
-      // window falls through to applications behind it. Verified through the
-      // X11 shape extension on XWayland; on native Wayland Chromium is
-      // expected to map it to the surface input region, which has not been
-      // confirmed on a desktop yet. This is independent of cursor coordinate
-      // scaling, unlike hover polling.
-      const bounds = this.widgetWindow.getBounds();
-      const shape = ignore
-        ? [this.getLinuxIdleWidgetShape(bounds)]
-        : [{ x: 0, y: 0, width: bounds.width, height: bounds.height }];
-      this.widgetWindow.setShape(shape);
+      const needsExpandedWindow = !ignore && expanded;
+      if (this.widgetExpanded !== needsExpandedWindow) {
+        this.widgetExpanded = needsExpandedWindow;
+        if (this.usesCompositorWidgetPlacement()) {
+          this.applyWidgetBounds(
+            this.getWidgetBoundsForWorkArea(
+              this.getActiveWidgetDisplayWorkArea(),
+            ),
+          );
+        }
+      }
+      // XWayland supports shapes. Hover/drag keep the input shape around
+      // the pill; only larger content needs the entire window. Native Wayland
+      // uses the compact physical surface above instead of relying on setShape.
+      if (!this.usesCompositorWidgetPlacement()) {
+        const bounds = this.widgetWindow.getBounds();
+        this.widgetWindow.setShape(
+          needsExpandedWindow
+            ? [{ x: 0, y: 0, width: bounds.width, height: bounds.height }]
+            : [this.getLinuxIdleWidgetShape(bounds)],
+        );
+      }
       this.widgetWindow.setIgnoreMouseEvents(false);
     } else {
       this.widgetWindow.setIgnoreMouseEvents(ignore, { forward: true });
     }
   }
 
+  private getWidgetControlSize(): { width: number; height: number } {
+    return this.widgetControlSize ?? { width: 108, height: 24 };
+  }
+
+  setWidgetControlSize(size: { width: number; height: number }): void {
+    if (process.platform !== "linux") return;
+    const previous = this.getWidgetControlSize();
+    if (previous.width === size.width && previous.height === size.height)
+      return;
+    this.widgetControlSize = size;
+    if (
+      !this.widgetWindow ||
+      this.widgetWindow.isDestroyed() ||
+      this.widgetExpanded
+    )
+      return;
+
+    if (this.usesCompositorWidgetPlacement()) {
+      this.applyWidgetBounds(
+        this.getWidgetBoundsForWorkArea(this.getActiveWidgetDisplayWorkArea()),
+      );
+    } else {
+      this.widgetWindow.setShape([
+        this.getLinuxIdleWidgetShape(this.widgetWindow.getBounds()),
+      ]);
+    }
+  }
+
   private getLinuxIdleWidgetShape(
     bounds: Electron.Rectangle,
   ): Electron.Rectangle {
-    const horizontalPadding = 8;
-    const verticalPadding = 6;
-
+    const { width, height } = this.getWidgetControlSize();
+    const padding = WindowManager.WIDGET_LINUX_PADDING;
     return {
-      x:
-        Math.round((bounds.width - WindowManager.WIDGET_IDLE_WIDTH) / 2) -
-        horizontalPadding,
-      y:
-        bounds.height -
-        WindowManager.WIDGET_BOTTOM_MARGIN -
-        WindowManager.WIDGET_IDLE_HEIGHT -
-        verticalPadding,
-      width: WindowManager.WIDGET_IDLE_WIDTH + horizontalPadding * 2,
-      height:
-        WindowManager.WIDGET_IDLE_HEIGHT +
-        WindowManager.WIDGET_BOTTOM_MARGIN +
-        verticalPadding,
+      x: Math.round((bounds.width - width) / 2) - padding,
+      y: bounds.height - height - padding * 2,
+      width: width + padding * 2,
+      height: height + padding * 2,
     };
   }
 
