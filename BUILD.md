@@ -97,7 +97,7 @@ To support various Linux flavors and display servers, Amical provides alternativ
 | **Clipboard (Default)**    | _(None)_      | Copies transcription to clipboard; manual <kbd>Ctrl</kbd>+<kbd>V</kbd> paste                           | Universal fallback                                        |
 | **Option A (`uinput`)**    | `uinput`      | Injects Shift+Insert through a persistent kernel virtual keyboard                                      | Wayland sessions, including GNOME; requires device access |
 | **Option B (`xtest`)**     | `xtest`       | Placeholder; not implemented                                                                           | Unavailable                                               |
-| **Option C (`gnome_ext`)** | `gnome_ext`   | Sends Shift+Insert from inside GNOME Shell through the Amical Integration extension (no `/dev/uinput`) | GNOME Wayland 45–50 with the extension installed          |
+| **Option C (`gnome_ext`)** | `gnome_ext`   | Sends Shift+Insert from inside GNOME Shell through the Amical Integration extension (no `/dev/uinput`) | GNOME Wayland 45–51 with the extension installed          |
 
 The uinput keyboard itself is independent of the display server, but this
 helper still uses Wayland for clipboard access. A pure X11 session is not yet
@@ -148,7 +148,7 @@ The Amical log records which backend is active at startup
 ### Option C: the Amical GNOME Shell extension
 
 `packages/native-helpers/linux-helper/gnome-extension/` holds the extension
-(`amical@amical.ai`, GNOME Shell 45–50). It exposes a small D-Bus API on GNOME
+(`amical@amical.ai`, GNOME Shell 45–51). It exposes a small D-Bus API on GNOME
 Shell's own bus name (`org.gnome.Shell`, path
 `/org/gnome/Shell/Extensions/Amical`) that Amical uses for:
 
