@@ -15,6 +15,7 @@ export * from "./schemas/methods/recheck-pressed-keys.js";
 export * from "./schemas/methods/get-selected-text-via-copy.js";
 export * from "./schemas/methods/get-linux-integration-status.js";
 export * from "./schemas/methods/place-widget-window.js";
+export * from "./schemas/methods/edit-watch.js";
 
 // Event Schemas
 export * from "./schemas/events/helper-events.js";
@@ -24,6 +25,9 @@ export * from "./schemas/remote-config.js";
 
 // Settings sync HTTP contract
 export * from "./schemas/settings-sync.js";
+
+// Vocabulary learning (term check) HTTP contract
+export * from "./schemas/vocabulary-learning.js";
 
 // Activity summary HTTP contract
 export * from "./schemas/activity-summary.js";

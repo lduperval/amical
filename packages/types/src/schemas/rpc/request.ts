@@ -21,6 +21,9 @@ const RPCMethodNameSchema = z.union([
   // Linux only (see the method schemas for the contract).
   z.literal("getLinuxIntegrationStatus"),
   z.literal("placeWidgetWindow"),
+  z.literal("startEditWatch"),
+  z.literal("readEditWatch"),
+  z.literal("stopEditWatch"),
 ]);
 
 export const RpcRequestSchema = z.object({
