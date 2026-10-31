@@ -356,6 +356,7 @@ export interface AppSettingsData {
     /** Centre point of the floating recording control, normalized to the
      * current display work area so it survives display and resolution changes. */
     widgetPosition?: {
+      displayId?: number;
       xRatio: number;
       yRatio: number;
     };

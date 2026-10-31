@@ -9,10 +9,15 @@ import {
 } from "vitest";
 import { WIDGET_WINDOW_TITLE, WindowManager } from "@main/core/window-manager";
 import type { SettingsService } from "@/services/settings-service";
+import { app, screen } from "electron";
 
 const originalPlatform = process.platform;
+const defaultDisplay = screen.getPrimaryDisplay();
 
 beforeEach(() => {
+  vi.mocked(screen.getAllDisplays).mockReturnValue([defaultDisplay]);
+  vi.mocked(screen.getPrimaryDisplay).mockReturnValue(defaultDisplay);
+  vi.mocked(screen.getDisplayNearestPoint).mockReturnValue(defaultDisplay);
   Object.defineProperty(process, "platform", {
     configurable: true,
     value: "linux",
@@ -20,6 +25,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -65,6 +71,41 @@ const createManager = (mode: "wayland" | "x11") => {
 };
 
 describe("WindowManager on native Wayland", () => {
+  it.each([
+    { savedDisplayId: undefined, expectedDisplayId: 2, expectedX: 2560 },
+    { savedDisplayId: 1, expectedDisplayId: 1, expectedX: 640 },
+  ])(
+    "restores monitor $expectedDisplayId at startup (saved: $savedDisplayId)",
+    async ({ savedDisplayId, expectedDisplayId, expectedX }) => {
+      const { manager, settingsService } = createManager("wayland");
+      const left = {
+        id: 1,
+        workArea: { x: 0, y: 0, width: 1920, height: 1040 },
+      } as Electron.Display;
+      const right = {
+        id: 2,
+        workArea: { x: 1920, y: 0, width: 1920, height: 1040 },
+      } as Electron.Display;
+      vi.mocked(screen.getAllDisplays).mockReturnValue([left, right]);
+      vi.mocked(screen.getPrimaryDisplay).mockReturnValue(right);
+      vi.mocked(screen.getDisplayNearestPoint).mockReturnValue(left);
+      vi.mocked(settingsService.getUISettings).mockResolvedValue({
+        theme: "system",
+        widgetPosition: { displayId: savedDisplayId, xRatio: 0.5, yRatio: 0.5 },
+      });
+      const place = vi.fn(async () => ({ success: true, found: true }));
+      manager.setLinuxWidgetPlacer({ place });
+      await manager.createWidgetWindow();
+      const window = Reflect.get(manager, "widgetWindow");
+      manager.showWidget();
+      expect(place).toHaveBeenCalledWith(
+        expect.objectContaining({ x: expectedX }),
+      );
+      window.emit("moved");
+      expect(Reflect.get(manager, "widgetDisplayId")).toBe(expectedDisplayId);
+    },
+  );
+
   it("asks the compositor to place the widget when it is shown", async () => {
     const { manager, widgetWindow } = createManager("wayland");
     const place = vi.fn(async () => ({ success: true, found: true }));
@@ -124,7 +165,11 @@ describe("WindowManager on native Wayland", () => {
     expect(settingsService.updateSettings).toHaveBeenCalledWith({
       ui: {
         theme: "system",
-        widgetPosition: { xRatio: 640 / 1920, yRatio: 500 / 1040 },
+        widgetPosition: {
+          displayId: 1,
+          xRatio: 640 / 1920,
+          yRatio: 500 / 1040,
+        },
       },
     });
   });
@@ -141,5 +186,90 @@ describe("WindowManager on native Wayland", () => {
     });
 
     expect(settingsService.updateSettings).not.toHaveBeenCalled();
+  });
+
+  it("does not snap a compositor drag back to the cursor's bogus origin", async () => {
+    vi.useFakeTimers();
+    const { manager } = createManager("wayland");
+    const right = {
+      id: 2,
+      workArea: { x: 1920, y: 0, width: 1920, height: 1040 },
+    } as Electron.Display;
+    vi.mocked(screen.getDisplayNearestPoint).mockReturnValue(right);
+    await manager.handleExternalWidgetMove({
+      title: WIDGET_WINDOW_TITLE,
+      x: 2400,
+      y: 500,
+      width: 640,
+      height: 320,
+    });
+    const place = vi.fn(async () => ({ success: true, found: true }));
+    manager.setLinuxWidgetPlacer({ place });
+    vi.mocked(screen.getCursorScreenPoint).mockReturnValue({ x: 0, y: 0 });
+    Reflect.get(manager, "startCursorPolling").call(manager);
+    vi.advanceTimersByTime(1000);
+    expect(Reflect.get(manager, "widgetDisplayId")).toBe(2);
+    expect(place).not.toHaveBeenCalled();
+  });
+
+  it("keeps the dragged monitor during display updates and widget shows", () => {
+    const { manager } = createManager("wayland");
+    const left = {
+      id: 1,
+      workArea: { x: 0, y: 0, width: 1920, height: 1040 },
+    } as Electron.Display;
+    const right = {
+      id: 2,
+      workArea: { x: 1920, y: 0, width: 1920, height: 1040 },
+    } as Electron.Display;
+    vi.mocked(screen.getAllDisplays).mockReturnValue([left, right]);
+    vi.mocked(screen.getPrimaryDisplay).mockReturnValue(right);
+    vi.mocked(screen.getDisplayNearestPoint).mockReturnValue(left);
+    Reflect.set(manager, "widgetDisplayId", 2);
+    const place = vi.fn(async () => ({ success: true, found: true }));
+    manager.setLinuxWidgetPlacer({ place });
+    manager.handleDisplayChange("display-metrics-changed");
+    manager.showWidget();
+    expect(place).toHaveBeenCalledTimes(2);
+    expect(place).toHaveBeenLastCalledWith(
+      expect.objectContaining({ x: 2560, above: true }),
+    );
+    expect(Reflect.get(manager, "widgetDisplayId")).toBe(2);
+  });
+
+  it("does not infer Wayland monitor changes from client-local focus bounds", () => {
+    const { manager } = createManager("wayland");
+    vi.mocked(app.on).mockClear();
+    Reflect.get(manager, "setupFocusBasedDisplayDetection").call(manager);
+    expect(app.on).not.toHaveBeenCalledWith(
+      "browser-window-focus",
+      expect.any(Function),
+    );
+  });
+
+  it("remembers a monitor change even when its relative position is unchanged", async () => {
+    const { manager, settingsService } = createManager("wayland");
+    Reflect.set(manager, "widgetPosition", {
+      displayId: 1,
+      xRatio: 0.5,
+      yRatio: 0.5,
+    });
+    vi.mocked(screen.getDisplayNearestPoint).mockReturnValue({
+      id: 2,
+      workArea: { x: 1920, y: 0, width: 1920, height: 1040 },
+    } as Electron.Display);
+    await manager.handleExternalWidgetMove({
+      title: WIDGET_WINDOW_TITLE,
+      x: 2560,
+      y: 220,
+      width: 640,
+      height: 320,
+    });
+    expect(settingsService.updateSettings).toHaveBeenCalledWith({
+      ui: {
+        theme: "system",
+        widgetPosition: { displayId: 2, xRatio: 0.5, yRatio: 0.5 },
+      },
+    });
   });
 });
