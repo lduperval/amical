@@ -59,6 +59,7 @@ sudo apt install -y \
   pkg-config \
   libasound2-dev \
   libudev-dev \
+  pulseaudio-utils \
   wl-clipboard
 ```
 
@@ -72,6 +73,7 @@ sudo dnf install -y \
   pkgconf-pkg-config \
   alsa-lib-devel \
   systemd-devel \
+  pulseaudio-utils \
   wl-clipboard
 ```
 
@@ -83,6 +85,7 @@ sudo pacman -S --needed \
   cmake \
   alsa-lib \
   systemd-libs \
+  libpulse \
   wl-clipboard
 ```
 
