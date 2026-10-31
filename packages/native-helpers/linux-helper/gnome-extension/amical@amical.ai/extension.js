@@ -119,7 +119,10 @@ export default class AmicalExtension extends Extension {
         this._lastForeignFocus = null;
 
         try {
-            const seat = Clutter.get_default_backend().get_default_seat();
+            // GNOME 51 removed Clutter.get_default_backend().
+            const backend = global.stage.context?.get_backend() ??
+                Clutter.get_default_backend();
+            const seat = backend.get_default_seat();
             this._keyboard = seat.create_virtual_device(
                 Clutter.InputDeviceType.KEYBOARD_DEVICE);
         } catch (e) {
