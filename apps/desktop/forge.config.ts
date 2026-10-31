@@ -61,9 +61,12 @@ function getLinuxMakers() {
     options: {
       bin: "Amical",
       mimeType: ["x-scheme-handler/amical"],
+      depends: ["pulseaudio-utils"],
     },
   });
-  const rpmMaker = new MakerRpm({ options: { bin: "Amical" } });
+  const rpmMaker = new MakerRpm({
+    options: { bin: "Amical", requires: ["pulseaudio-utils"] },
+  });
 
   const explicitFormat = process.env.AMICAL_LINUX_FORMAT?.toLowerCase();
   if (explicitFormat === "all") {
