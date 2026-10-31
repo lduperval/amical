@@ -869,7 +869,9 @@
         "conflictsWithSystem": "{{shortcut}} 與目前的系統快捷鍵衝突",
         "addModifier": "請增加修飾鍵（如 {{mod1}}、{{mod2}} 或是 {{mod3}}）",
         "duplicateModifierPairs": "無法同時使用左側與右側的 {{modifier}}",
-        "overlapsWithPushToTalk": "這與您的「按住說話」快捷鍵重疊，可能會導致問題"
+        "overlapsWithPushToTalk": "這與您的「按住說話」快捷鍵重疊，可能會導致問題",
+        "linuxPortalTriggerRequired": "Wayland 快捷鍵必須包含且僅包含一個非修飾觸發鍵，例如空白鍵或字母鍵",
+        "linuxGlobalShortcutsUnavailable": "你的 Wayland 桌面未提供全域快捷鍵入口。此快捷鍵已儲存，但無法觸發 Amical；請改用浮動控制項。"
       },
       "input": {
         "pressKeys": "請按下按鍵...",

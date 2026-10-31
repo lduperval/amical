@@ -869,7 +869,9 @@
         "conflictsWithSystem": "{{shortcut}} entra en conflicto con un atajo del sistema",
         "addModifier": "Agrega una tecla modificadora como {{mod1}}, {{mod2}} o {{mod3}}",
         "duplicateModifierPairs": "No se pueden usar las teclas {{modifier}} izquierda y derecha juntas",
-        "overlapsWithPushToTalk": "Esto se superpone con tu atajo de Pulsar para hablar y puede causar problemas"
+        "overlapsWithPushToTalk": "Esto se superpone con tu atajo de Pulsar para hablar y puede causar problemas",
+        "linuxPortalTriggerRequired": "Los atajos de Wayland necesitan exactamente una tecla de activación que no sea modificadora, como Espacio o una letra",
+        "linuxGlobalShortcutsUnavailable": "Tu escritorio Wayland no ofrece el portal de atajos globales. Este atajo se ha guardado, pero no puede activar Amical; usa el control flotante."
       },
       "input": {
         "pressKeys": "Presiona las teclas...",
