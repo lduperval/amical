@@ -15,6 +15,29 @@ import {
 } from "../../src/db/app-settings";
 
 describe("SettingsService", () => {
+  it("defaults the widget outline off for existing settings", async () => {
+    const service = SettingsService.createForTests();
+    await expect(service.getPreferences()).resolves.toMatchObject({
+      showWidgetOutline: false,
+    });
+  });
+
+  it("persists the widget outline and broadcasts changes", async () => {
+    const service = SettingsService.createForTests();
+    const listener = vi.fn();
+    service.on("preferences-changed", listener);
+
+    await service.setPreferences({ showWidgetOutline: true });
+
+    expect(updateSettingsSection).toHaveBeenCalledWith(
+      "preferences",
+      expect.objectContaining({ showWidgetOutline: true }),
+    );
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({ changes: { showWidgetOutline: true } }),
+    );
+  });
+
   it("defaults labs self correction off when unset", async () => {
     vi.mocked(getSettingsSection).mockResolvedValueOnce(undefined);
 

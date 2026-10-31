@@ -60,15 +60,28 @@ export const widgetRouter = createRouter({
       return true;
     }),
 
+  setControlSize: procedure
+    .input(
+      z.object({
+        width: z.number().int().min(1).max(640),
+        height: z.number().int().min(1).max(320),
+      }),
+    )
+    .mutation(({ ctx, input }) => {
+      ctx.services.windowManager.setWidgetControlSize(input);
+      return true;
+    }),
+
   setIgnoreMouseEvents: procedure
     .input(
       z.object({
         ignore: z.boolean(),
+        expanded: z.boolean().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
       const windowManager = ctx.services.windowManager;
-      windowManager.setWidgetIgnoreMouseEvents(input.ignore);
+      windowManager.setWidgetIgnoreMouseEvents(input.ignore, input.expanded);
       logger.main.debug("Set widget ignore mouse events", input);
       return true;
     }),

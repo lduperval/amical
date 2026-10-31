@@ -568,6 +568,10 @@
         "label": "Zwischenablage-Inhalt bewahren",
         "description": "Stelle nach dem Einfügen einer Transkription den vorherigen Inhalt der Zwischenablage wieder her."
       },
+      "widgetOutline": {
+        "label": "Pillenumriss anzeigen",
+        "description": "Einen rosa Umriss und eine Tönung um das schwebende Widget anzeigen, um seine Grenzen zu prüfen."
+      },
       "debugMode": {
         "label": "Debug-Modus",
         "description": "Detaillierte Protokollierung aktivieren"

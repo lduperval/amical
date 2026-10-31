@@ -568,6 +568,10 @@
         "label": "Conservar el contenido del portapapeles",
         "description": "Después de pegar una transcripción, restaura lo que antes estaba en el portapapeles."
       },
+      "widgetOutline": {
+        "label": "Mostrar contorno de la píldora",
+        "description": "Muestra un contorno y un tinte rosa alrededor del widget flotante para comprobar sus límites."
+      },
       "debugMode": {
         "label": "Modo de depuración",
         "description": "Habilitar registro detallado"

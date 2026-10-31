@@ -58,6 +58,9 @@ const createManager = (mode: "wayland" | "x11") => {
     isVisible: vi.fn(() => true),
     showInactive: vi.fn(),
     setBounds: vi.fn(),
+    setSize: vi.fn(),
+    setShape: vi.fn(),
+    setIgnoreMouseEvents: vi.fn(),
     getBounds: vi.fn(() => ({ x: 0, y: 0, width: 640, height: 320 })),
   };
   Reflect.set(manager, "widgetWindow", widgetWindow);
@@ -72,8 +75,8 @@ const createManager = (mode: "wayland" | "x11") => {
 
 describe("WindowManager on native Wayland", () => {
   it.each([
-    { savedDisplayId: undefined, expectedDisplayId: 2, expectedX: 2560 },
-    { savedDisplayId: 1, expectedDisplayId: 1, expectedX: 640 },
+    { savedDisplayId: undefined, expectedDisplayId: 2, expectedX: 2821 },
+    { savedDisplayId: 1, expectedDisplayId: 1, expectedX: 901 },
   ])(
     "restores monitor $expectedDisplayId at startup (saved: $savedDisplayId)",
     async ({ savedDisplayId, expectedDisplayId, expectedX }) => {
@@ -116,15 +119,62 @@ describe("WindowManager on native Wayland", () => {
     expect(widgetWindow.showInactive).toHaveBeenCalledOnce();
     expect(widgetWindow.setBounds).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(place).toHaveBeenCalledOnce());
-    // Bottom-centre of the mocked 1920x1040 work area: (1920-640)/2 = 640,
-    // 1040 - 320 - 24px dock clearance = 696.
+    // Compact window at bottom-centre, with 24px dock clearance.
     expect(place).toHaveBeenCalledWith({
       title: WIDGET_WINDOW_TITLE,
-      x: 640,
-      y: 696,
+      x: 901,
+      y: 982,
       above: true,
       sticky: true,
     });
+  });
+
+  it("keeps a compact surface on hover and restores it after larger content closes", () => {
+    const { manager, widgetWindow } = createManager("wayland");
+    let bounds = { x: 0, y: 0, width: 118, height: 34 };
+    widgetWindow.getBounds.mockImplementation(() => bounds);
+    widgetWindow.setSize.mockImplementation((width, height) => {
+      bounds = { ...bounds, width, height };
+    });
+    const place = vi.fn(async () => ({ success: true, found: true }));
+    manager.setLinuxWidgetPlacer({ place });
+
+    manager.setWidgetIgnoreMouseEvents(false, false);
+    expect(widgetWindow.setSize).not.toHaveBeenCalled();
+
+    manager.setWidgetIgnoreMouseEvents(false, true);
+    expect(widgetWindow.setSize).toHaveBeenLastCalledWith(640, 320);
+    expect(place).toHaveBeenLastCalledWith(
+      expect.objectContaining({ x: 640, y: 696 }),
+    );
+
+    // A toast closing while the mouse still hovers must also shrink the surface.
+    manager.setWidgetIgnoreMouseEvents(false, false);
+    expect(widgetWindow.setSize).toHaveBeenLastCalledWith(118, 34);
+    expect(place).toHaveBeenLastCalledWith(
+      expect.objectContaining({ x: 901, y: 982 }),
+    );
+    expect(widgetWindow.setShape).not.toHaveBeenCalled();
+    expect(widgetWindow.setIgnoreMouseEvents).toHaveBeenLastCalledWith(false);
+  });
+
+  it("sizes the Wayland surface to the measured pill plus 5px per side", () => {
+    const { manager, widgetWindow } = createManager("wayland");
+    manager.setWidgetControlSize({ width: 108, height: 24 });
+    manager.setWidgetControlSize({ width: 136, height: 24 });
+    expect(widgetWindow.setSize).toHaveBeenLastCalledWith(146, 34);
+    manager.setWidgetControlSize({ width: 96, height: 30 });
+    expect(widgetWindow.setSize).toHaveBeenLastCalledWith(106, 40);
+  });
+
+  it("remembers measured dimensions during expanded content and applies them on collapse", () => {
+    const { manager, widgetWindow } = createManager("wayland");
+    manager.setWidgetIgnoreMouseEvents(false, true);
+    widgetWindow.setSize.mockClear();
+    manager.setWidgetControlSize({ width: 128, height: 24 });
+    expect(widgetWindow.setSize).not.toHaveBeenCalled();
+    manager.setWidgetIgnoreMouseEvents(true, false);
+    expect(widgetWindow.setSize).toHaveBeenLastCalledWith(138, 34);
   });
 
   it("keeps using setBounds on XWayland", () => {
@@ -161,14 +211,14 @@ describe("WindowManager on native Wayland", () => {
     });
 
     // Anchor = window centre-x, bottom minus the 8px margin and half the
-    // 24px idle pill: (640, 500) over the 1920x1040 work area.
+    // 24px idle pill: (640, 503) over the 1920x1040 work area.
     expect(settingsService.updateSettings).toHaveBeenCalledWith({
       ui: {
         theme: "system",
         widgetPosition: {
           displayId: 1,
           xRatio: 640 / 1920,
-          yRatio: 500 / 1040,
+          yRatio: 503 / 1040,
         },
       },
     });
@@ -232,7 +282,7 @@ describe("WindowManager on native Wayland", () => {
     manager.showWidget();
     expect(place).toHaveBeenCalledTimes(2);
     expect(place).toHaveBeenLastCalledWith(
-      expect.objectContaining({ x: 2560, above: true }),
+      expect.objectContaining({ x: 2821, above: true }),
     );
     expect(Reflect.get(manager, "widgetDisplayId")).toBe(2);
   });
@@ -261,7 +311,7 @@ describe("WindowManager on native Wayland", () => {
     await manager.handleExternalWidgetMove({
       title: WIDGET_WINDOW_TITLE,
       x: 2560,
-      y: 220,
+      y: 217,
       width: 640,
       height: 320,
     });

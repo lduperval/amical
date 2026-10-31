@@ -426,6 +426,7 @@ export interface AppSettingsData {
     muteDictationSounds?: boolean;
     autoDictateOnNewNote?: boolean;
     preserveClipboard?: boolean;
+    showWidgetOutline?: boolean;
     // Windows only: honor injected keystrokes (LLKHF_INJECTED) when matching
     // shortcuts instead of filtering them out. See the native ShortcutMonitor.
     allowInjectedKeys?: boolean;
