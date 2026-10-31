@@ -216,11 +216,11 @@ export class WindowManager extends EventEmitter {
       return trackedDisplay.workArea;
     }
 
-    const cursorDisplay = screen.getDisplayNearestPoint(
-      screen.getCursorScreenPoint(),
-    );
-    this.widgetDisplayId = cursorDisplay.id;
-    return cursorDisplay.workArea;
+    const fallbackDisplay = this.usesCompositorWidgetPlacement()
+      ? screen.getPrimaryDisplay()
+      : screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    this.widgetDisplayId = fallbackDisplay.id;
+    return fallbackDisplay.workArea;
   }
 
   /**
@@ -513,9 +513,16 @@ export class WindowManager extends EventEmitter {
 
   async createWidgetWindow(): Promise<void> {
     const initialCursorPoint = screen.getCursorScreenPoint();
-    const initialDisplay = screen.getDisplayNearestPoint(initialCursorPoint);
     const uiSettings = await this.settingsService.getUISettings();
     this.widgetPosition = uiSettings.widgetPosition ?? null;
+    // Wayland does not expose global cursor coordinates to Electron. Keep
+    // the monitor selected by a compositor drag, defaulting to the primary.
+    const initialDisplay = this.usesCompositorWidgetPlacement()
+      ? (screen
+          .getAllDisplays()
+          .find((display) => display.id === this.widgetPosition?.displayId) ??
+        screen.getPrimaryDisplay())
+      : screen.getDisplayNearestPoint(initialCursorPoint);
     const widgetBounds = this.getWidgetBoundsForWorkArea(
       initialDisplay.workArea,
     );
@@ -594,6 +601,11 @@ export class WindowManager extends EventEmitter {
     });
 
     this.widgetWindow.on("moved", () => {
+      // Native Wayland getBounds() reports client-local coordinates. Only
+      // the extension's WidgetMoved event has the real desktop position.
+      if (this.usesCompositorWidgetPlacement()) {
+        return;
+      }
       if (!this.widgetWindow || this.widgetWindow.isDestroyed()) {
         return;
       }
@@ -928,6 +940,9 @@ export class WindowManager extends EventEmitter {
   }
 
   private setupFocusBasedDisplayDetection(): void {
+    if (this.usesCompositorWidgetPlacement()) {
+      return;
+    }
     // Listen for any window focus events to detect active display changes
     app.on("browser-window-focus", (_event, window) => {
       if (!window || window.isDestroyed()) return;
@@ -958,7 +973,7 @@ export class WindowManager extends EventEmitter {
   }
 
   private startCursorPolling(): void {
-    if (this.cursorPollingInterval) {
+    if (this.usesCompositorWidgetPlacement() || this.cursorPollingInterval) {
       return;
     }
 
@@ -1013,8 +1028,12 @@ export class WindowManager extends EventEmitter {
     if (!this.widgetWindow || this.widgetWindow.isDestroyed()) return;
 
     // Get the current display based on cursor position
-    const cursorPoint = screen.getCursorScreenPoint();
-    const currentDisplay = screen.getDisplayNearestPoint(cursorPoint);
+    const currentDisplay = this.usesCompositorWidgetPlacement()
+      ? (screen
+          .getAllDisplays()
+          .find((display) => display.id === this.widgetDisplayId) ??
+        screen.getPrimaryDisplay())
+      : screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
 
     // Update window bounds to match new display's work area
     this.applyWidgetBounds(
@@ -1090,6 +1109,7 @@ export class WindowManager extends EventEmitter {
     display: Electron.Display,
   ): Promise<void> {
     const position: WidgetPosition = {
+      displayId: display.id,
       xRatio: Math.min(
         1,
         Math.max(0, (anchor.x - display.workArea.x) / display.workArea.width),
@@ -1104,6 +1124,7 @@ export class WindowManager extends EventEmitter {
     const previous = this.widgetPosition;
     if (
       previous &&
+      previous.displayId === position.displayId &&
       Math.abs(previous.xRatio - position.xRatio) < 0.002 &&
       Math.abs(previous.yRatio - position.yRatio) < 0.002
     ) {
