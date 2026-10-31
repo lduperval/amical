@@ -306,11 +306,12 @@ const settleGrpcOk = (
   rawTranscript: string,
   formattedTranscript = rawTranscript,
   throughSeq = "1",
+  language?: string,
 ) => {
   const stream = grpcMock.getLastStream();
   if (!stream) throw new Error("No grpc stream constructed");
   stream.emit("data", {
-    final: { rawTranscript, formattedTranscript, throughSeq },
+    final: { rawTranscript, formattedTranscript, throughSeq, language },
   });
   stream.emit("status", {
     code: grpcMock.status.OK,
@@ -412,6 +413,25 @@ describe("AmicalCloudProvider", () => {
       expect(result.text).toBe("hello world");
       expect(grpcMock.getLastClient()).toBeNull();
       expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("gRPC final transcript", () => {
+    it("returns the session language as the detected language", async () => {
+      const provider = openCloudSessionWithTransport("grpc");
+      await provider.transcribe({
+        audioData: audioFrame(),
+        speechProbability: 1,
+        context: baseContext(),
+      });
+      const finalization = provider.flush(baseContext());
+      await flush();
+      settleGrpcOk("colour", "Colour.", "1", "en");
+
+      await expect(finalization).resolves.toEqual({
+        text: "Colour.",
+        detectedLanguage: "en",
+      });
     });
   });
 
@@ -716,6 +736,62 @@ describe("AmicalCloudProvider", () => {
         "amical-labs": "self-correction",
         "Accept-Language": "ja",
       });
+    });
+  });
+
+  describe("HTTP language lock", () => {
+    const selection = ["en-GB", "de"];
+    const context = baseContext({ languages: selection });
+
+    // Each call buffers 28 seconds, which sends one non-final request.
+    const sendChunk = (
+      provider: TestCloudSession,
+      response: Record<string, unknown>,
+    ) => {
+      mockFetchOnce({ status: 200, json: { success: true, ...response } });
+      return provider.transcribe({
+        audioData: audioFrame(HTTP_AUTO_FLUSH_SAMPLES),
+        speechProbability: 1,
+        context,
+      });
+    };
+    const sentLanguages = () =>
+      fetchMock.mock.calls.map(
+        (_, index) => httpRequestBody(index).languages as string[],
+      );
+
+    it("locks to the selected code of the first reported language and keeps it", async () => {
+      const provider = openCloudSessionWithTransport("http");
+
+      await sendChunk(provider, { transcription: "Hello", language: "en" });
+      await sendChunk(provider, { transcription: "Hello there" });
+      mockFetchOnce({
+        status: 200,
+        json: { success: true, transcription: "Hello there." },
+      });
+      await provider.flush({
+        ...context,
+        aggregatedTranscription: "Hello there",
+      });
+
+      expect(sentLanguages()).toEqual([selection, ["en-GB"], ["en-GB"]]);
+      expect(httpRequestBody(2)).toMatchObject({ isFinal: true });
+    });
+
+    it("keeps the full list until a selected language is reported with text", async () => {
+      const provider = openCloudSessionWithTransport("http");
+
+      await sendChunk(provider, { transcription: "Bonjour", language: "fr" });
+      await sendChunk(provider, { transcription: "", language: "de" });
+      await sendChunk(provider, { transcription: "Hallo", language: "de" });
+      await sendChunk(provider, { transcription: "Hallo zusammen" });
+
+      expect(sentLanguages()).toEqual([
+        selection,
+        selection,
+        selection,
+        ["de"],
+      ]);
     });
   });
 
