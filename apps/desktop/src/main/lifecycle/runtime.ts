@@ -77,6 +77,8 @@ export interface RecordingLifecycleDeps {
   bridge: HostPasteBridge | null;
   getPreserveClipboard: () => Promise<boolean>;
   hasSpeechModelSelected: () => Promise<boolean>;
+  isUpdateRequired?: () => boolean;
+  onUpdateRequired?: () => void;
   /** Second-binding (draft chord) level, polled at start and per chunk. */
   isDraftChordActive: () => boolean;
   /** Grammar-side Enter routing arm (shortcut-manager draft mode). */
@@ -106,7 +108,7 @@ export interface RecordingLifecycle {
 
   // Renderer capture handshake + chunk traffic
   captureStarted(session: SessionId, microphone: CapturedMicrophone): void;
-  captureStartFailed(
+  captureFailed(
     session: SessionId,
     failure: { name?: string; message: string },
   ): void;
@@ -345,6 +347,11 @@ export function createRecordingLifecycle(
       refuseStart();
       return;
     }
+    if (deps.isUpdateRequired?.()) {
+      deps.onUpdateRequired?.();
+      refuseStart();
+      return;
+    }
     if (deps.transcriptionService.isHistoryRetryInProgress()) {
       notify({
         type: "transcription_failed",
@@ -466,7 +473,7 @@ export function createRecordingLifecycle(
     }
 
     if (now.publicState === "recording" && was.publicState !== "recording") {
-      recordingStartedAt = Date.now();
+      recordingStartedAt = performance.now();
       recordingStoppedAt = null;
       if (snapshot.sessionId !== null) {
         // The moment recording went live; the payload reads it as an offset
@@ -489,7 +496,7 @@ export function createRecordingLifecycle(
       });
     }
     if (was.publicState === "recording" && now.publicState !== "recording") {
-      recordingStoppedAt = Date.now();
+      recordingStoppedAt = performance.now();
       clearReminder();
     }
 
@@ -616,12 +623,9 @@ export function createRecordingLifecycle(
         shell.updateMetadata({ microphone: microphone.name });
       }
     },
-    captureStartFailed: (session, failure) => {
+    captureFailed: (session, failure) => {
       failureDetails.set(session, { uiMessage: failure.message });
-      recorder.captureStartFailed(
-        session,
-        ErrorCodes.MICROPHONE_CAPTURE_FAILED,
-      );
+      recorder.captureFailed(session, ErrorCodes.MICROPHONE_CAPTURE_FAILED);
     },
     handleAudioChunk: (session, chunk, isFinalChunk) =>
       recorder.handleAudioChunk(session, chunk, isFinalChunk),

@@ -330,7 +330,7 @@ export class NotesWindowController {
     });
   }
 
-  private sendOpenRequestToNotesWindow(noteId?: number): void {
+  private sendOpenRequestToNotesWindow(noteId?: string): void {
     this.sendEventToNotesWindow("notes-window:open-requested", noteId);
   }
 
@@ -362,7 +362,7 @@ export class NotesWindowController {
 
   private createNotesWindow(
     initialBounds: Electron.Rectangle,
-    bootstrapNoteId?: number,
+    bootstrapNoteId?: string,
   ): BrowserWindow | null {
     if (this.notesWindow && !this.notesWindow.isDestroyed()) {
       return this.notesWindow;
@@ -391,7 +391,7 @@ export class NotesWindowController {
     });
 
     const bootstrapHash = new URLSearchParams({
-      noteId: typeof bootstrapNoteId === "number" ? `${bootstrapNoteId}` : "",
+      noteId: bootstrapNoteId ?? "",
     }).toString();
 
     if (this.options.mainWindowViteDevServerUrl) {
@@ -443,7 +443,7 @@ export class NotesWindowController {
     return this.notesWindow;
   }
 
-  private async showNotesWindow(noteId?: number): Promise<void> {
+  private async showNotesWindow(noteId?: string): Promise<void> {
     this.options.setWidgetIgnoreMouseEvents(true);
 
     const targetBounds = await this.getNotesWindowBounds(
@@ -495,7 +495,7 @@ export class NotesWindowController {
     }
   }
 
-  open(noteId?: number): void {
+  open(noteId?: string): void {
     void this.showNotesWindow(noteId);
   }
 

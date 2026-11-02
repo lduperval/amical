@@ -61,6 +61,8 @@ const settle = async (rounds = 4) => {
 
 function makeHarness(options?: {
   hasSpeechModelSelected?: () => Promise<boolean>;
+  isUpdateRequired?: () => boolean;
+  onUpdateRequired?: () => void;
   resolveText?: string;
   hasModel?: boolean;
   retryInProgress?: boolean;
@@ -101,6 +103,8 @@ function makeHarness(options?: {
 
   const lifecycle: RecordingLifecycle = createRecordingLifecycle({
     transcriptionService: service,
+    isUpdateRequired: options?.isUpdateRequired,
+    onUpdateRequired: options?.onUpdateRequired,
     ambiance: {
       begin: () => ({
         beepGate: Promise.resolve(),
@@ -401,28 +405,36 @@ describe("recording lifecycle runtime", () => {
     expect(db.deleteProvisionalTranscription).toHaveBeenCalled();
   });
 
-  it("draft sessions stage for review; Enter confirms and pastes", async () => {
-    const h2 = makeHarness({ draftChord: () => true });
-    const s2 = await h2.startToRecording();
-    h2.timers.fire(TUNING.pressWindowMs);
-    await h2.lifecycle.handleAudioChunk(s2, h2.frames(0.5), false);
-    h2.lifecycle.setPttLevel(false);
-    await settle();
-    await h2.lifecycle.handleAudioChunk(s2, h2.frames(0.5), true);
-    await settle();
+  it.each([false, true])(
+    "draft review and Enter paste work with update required=%s",
+    async (required) => {
+      let updateRequired = false;
+      const h2 = makeHarness({
+        draftChord: () => true,
+        isUpdateRequired: () => updateRequired,
+      });
+      const s2 = await h2.startToRecording();
+      updateRequired = required;
+      h2.timers.fire(TUNING.pressWindowMs);
+      await h2.lifecycle.handleAudioChunk(s2, h2.frames(0.5), false);
+      h2.lifecycle.setPttLevel(false);
+      await settle();
+      await h2.lifecycle.handleAudioChunk(s2, h2.frames(0.5), true);
+      await settle();
 
-    expect(h2.pastes).toEqual([]);
-    expect(h2.lifecycle.getPendingDraft()).toEqual({
-      sessionId: s2,
-      text: "hello world",
-    });
-    expect(h2.lifecycle.getSnapshot().projection.publicState).toBe("idle");
+      expect(h2.pastes).toEqual([]);
+      expect(h2.lifecycle.getPendingDraft()).toEqual({
+        sessionId: s2,
+        text: "hello world",
+      });
+      expect(h2.lifecycle.getSnapshot().projection.publicState).toBe("idle");
 
-    await h2.lifecycle.confirmDraftFromInput();
-    await settle();
-    expect(h2.pastes).toEqual(["hello world"]);
-    expect(h2.lifecycle.getPendingDraft()).toBeNull();
-  });
+      await h2.lifecycle.confirmDraftFromInput();
+      await settle();
+      expect(h2.pastes).toEqual(["hello world"]);
+      expect(h2.lifecycle.getPendingDraft()).toBeNull();
+    },
+  );
 
   it("admission gates: missing model and active history retry refuse with a toast", async () => {
     const noModel = makeHarness({ hasModel: false });
@@ -631,7 +643,7 @@ describe("recording lifecycle runtime", () => {
   });
 
   it("empty transcripts toast only past the duration gate (D24)", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.useFakeTimers({ toFake: ["Date", "performance"] });
 
     // Short recording: sealed empty, but the notice stays silent.
     const short = makeHarness({ resolveText: "" });
@@ -642,7 +654,8 @@ describe("recording lifecycle runtime", () => {
       short.frames(0.5),
       false,
     );
-    vi.setSystemTime(Date.now() + TUNING.emptyNoticeMinRecordingMs);
+    vi.advanceTimersByTime(TUNING.emptyNoticeMinRecordingMs);
+    vi.setSystemTime(Date.now() + 60_000);
     short.lifecycle.setPttLevel(false);
     await settle();
     await short.lifecycle.handleAudioChunk(
@@ -662,7 +675,8 @@ describe("recording lifecycle runtime", () => {
     const longSession = await long.startToRecording("Blue Yeti");
     long.timers.fire(TUNING.pressWindowMs);
     await long.lifecycle.handleAudioChunk(longSession, long.frames(0.5), false);
-    vi.setSystemTime(Date.now() + TUNING.emptyNoticeMinRecordingMs + 1);
+    vi.advanceTimersByTime(TUNING.emptyNoticeMinRecordingMs + 1);
+    vi.setSystemTime(Date.now() - 60_000);
     long.lifecycle.setPttLevel(false);
     await settle();
     await long.lifecycle.handleAudioChunk(longSession, long.frames(0.5), true);
@@ -874,4 +888,77 @@ describe("session-work wiring (S0.5)", () => {
     await settle();
     expect(calls).toEqual([]);
   });
+});
+
+describe("required update admission", () => {
+  it("leaves paste-last available without opening the update window", async () => {
+    const notice = vi.fn();
+    const h = makeHarness({
+      isUpdateRequired: () => true,
+      onUpdateRequired: notice,
+    });
+    db.getLatestTranscription.mockClear();
+    await h.lifecycle.pasteLatestTranscription();
+    expect(db.getLatestTranscription).toHaveBeenCalledOnce();
+    expect(notice).not.toHaveBeenCalled();
+    h.lifecycle.dispose();
+  });
+
+  it.each(["ptt", "toggle", "surface"])(
+    "blocks %s before recording and recovers when lifted",
+    async (input) => {
+      let required = true;
+      const notice = vi.fn();
+      const h = makeHarness({
+        isUpdateRequired: () => required,
+        onUpdateRequired: notice,
+      });
+      const start = async () => {
+        if (input === "ptt") h.lifecycle.setPttLevel(true);
+        else if (input === "toggle") h.lifecycle.toggleKey();
+        else await h.lifecycle.startDictation();
+        await settle();
+      };
+      await start();
+      expect(h.lifecycle.getSnapshot().projection.publicState).toBe("idle");
+      expect(notice).toHaveBeenCalledOnce();
+      h.lifecycle.setPttLevel(false);
+      await settle();
+      required = false;
+      await start();
+      expect(h.lifecycle.getSnapshot().projection.publicState).toBe("starting");
+      h.lifecycle.dispose();
+    },
+  );
+});
+
+it("finishes and saves an active recording when an update becomes required", async () => {
+  let required = false;
+  const notice = vi.fn();
+  const h = makeHarness({
+    isUpdateRequired: () => required,
+    onUpdateRequired: notice,
+  });
+  const session = await h.startToRecording();
+  h.timers.fire(TUNING.pressWindowMs);
+  await h.lifecycle.handleAudioChunk(session, h.frames(0.5), false);
+  await settle();
+  required = true;
+  await h.lifecycle.startDictation();
+  expect(notice).not.toHaveBeenCalled();
+  h.lifecycle.setPttLevel(false);
+  await settle();
+  await h.lifecycle.handleAudioChunk(session, h.frames(0.5), true);
+  await settle();
+  expect(db.stampTranscriptionDisposition).toHaveBeenCalledWith(
+    session,
+    expect.objectContaining({ disposition: "success", text: "hello world" }),
+  );
+  expect(h.pastes).toEqual(["hello world"]);
+  expect(h.lifecycle.getSnapshot().projection.publicState).toBe("idle");
+  await h.lifecycle.startDictation();
+  await settle();
+  expect(notice).toHaveBeenCalledOnce();
+  expect(h.lifecycle.getSnapshot().projection.publicState).toBe("idle");
+  h.lifecycle.dispose();
 });

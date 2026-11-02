@@ -1,3 +1,4 @@
+import { createEntityId } from "@amical/types";
 import { sql } from "drizzle-orm";
 import {
   sqliteTable,
@@ -26,6 +27,10 @@ export const transcriptions = sqliteTable(
     // settles it.
     sessionId: text("session_id"),
     disposition: text("disposition"),
+    // Consumed atomically when a successful row is staged in the activity outbox.
+    activityPending: integer("activity_pending", { mode: "boolean" })
+      .notNull()
+      .default(true),
     text: text("text").notNull(),
     timestamp: integer("timestamp", { mode: "timestamp" })
       .notNull()
@@ -46,7 +51,14 @@ export const transcriptions = sqliteTable(
       .notNull()
       .default(sql`(unixepoch())`),
   },
-  (table) => [index("transcriptions_session_id_idx").on(table.sessionId)],
+  (table) => [
+    index("transcriptions_session_id_idx").on(table.sessionId),
+    index("transcriptions_activity_pending_idx")
+      .on(table.createdAt, table.id)
+      .where(
+        sql`${table.activityPending} = 1 AND ${table.disposition} = 'success'`,
+      ),
+  ],
 );
 
 // Vocabulary table
@@ -55,7 +67,7 @@ export const vocabulary = sqliteTable(
   {
     id: text("id")
       .notNull()
-      .$defaultFn(() => crypto.randomUUID()),
+      .$defaultFn(() => createEntityId("vocabulary")),
     scopeType: text("scope_type", { enum: ["user", "org"] })
       .notNull()
       .default("user"),
@@ -91,7 +103,7 @@ export const snippets = sqliteTable(
   {
     id: text("id")
       .notNull()
-      .$defaultFn(() => crypto.randomUUID()),
+      .$defaultFn(() => createEntityId("snippet")),
     scopeType: text("scope_type", { enum: ["user", "org"] })
       .notNull()
       .default("user"),
@@ -116,7 +128,7 @@ export const snippets = sqliteTable(
 );
 
 export type SyncScopeType = "user" | "org";
-export type SyncCollection = "vocabulary" | "snippet";
+export type { SettingsSyncCollection as SyncCollection } from "@amical/types";
 export type VocabularySyncPayload = {
   word: string;
   replacement: string | null;
@@ -125,7 +137,12 @@ export type SnippetSyncPayload = {
   trigger: string;
   content: string;
 };
-export type SyncPayload = VocabularySyncPayload | SnippetSyncPayload;
+export type { NoteSyncPayload } from "@amical/types";
+import type { NoteSyncPayload } from "@amical/types";
+export type SyncPayload =
+  | VocabularySyncPayload
+  | SnippetSyncPayload
+  | NoteSyncPayload;
 
 // Singleton sequence allocator shared by every synchronized collection.
 export const syncClientState = sqliteTable("sync_client_state", {
@@ -152,7 +169,7 @@ export const syncCollectionState = sqliteTable(
     scopeType: text("scope_type", { enum: ["user", "org"] }).notNull(),
     scopeId: text("scope_id").notNull(),
     collection: text("collection", {
-      enum: ["vocabulary", "snippet"],
+      enum: ["vocabulary", "snippet", "note"],
     }).notNull(),
     cursor: integer("cursor").notNull().default(0),
   },
@@ -163,7 +180,7 @@ export const syncCollectionState = sqliteTable(
   ],
 );
 
-// The domain row UUID is also its sync ID. Accepted server state remains in a
+// The domain row ID is also its sync ID. Accepted server state remains in a
 // scope-specific sidecar so physical deletion can still sync a tombstone.
 export const syncItemState = sqliteTable(
   "sync_item_state",
@@ -171,10 +188,12 @@ export const syncItemState = sqliteTable(
     scopeType: text("scope_type", { enum: ["user", "org"] }).notNull(),
     scopeId: text("scope_id").notNull(),
     collection: text("collection", {
-      enum: ["vocabulary", "snippet"],
+      enum: ["vocabulary", "snippet", "note"],
     }).notNull(),
     syncId: text("sync_id").notNull(),
     acceptedSyncVersion: integer("accepted_sync_version"),
+    // Last remote note change; local push acknowledgments do not advance it.
+    noteRemoteVersion: integer("note_remote_version"),
     acceptedPayload: text("accepted_payload", {
       mode: "json",
     }).$type<SyncPayload | null>(),
@@ -194,7 +213,7 @@ export const syncOutbox = sqliteTable(
     scopeType: text("scope_type", { enum: ["user", "org"] }).notNull(),
     scopeId: text("scope_id").notNull(),
     collection: text("collection", {
-      enum: ["vocabulary", "snippet"],
+      enum: ["vocabulary", "snippet", "note"],
     }).notNull(),
     syncId: text("sync_id").notNull(),
     desiredPayload: text("desired_payload", {
@@ -212,6 +231,8 @@ export const syncOutbox = sqliteTable(
     }).$type<SyncPayload | null>(),
     headExpectedSyncVersion: integer("head_expected_sync_version"),
     headSequence: integer("head_sequence"),
+    blockedReason: text("blocked_reason"),
+    desiredNotBefore: integer("desired_not_before").notNull().default(0),
   },
   (table) => [
     primaryKey({
@@ -234,23 +255,18 @@ export const activityOutbox = sqliteTable(
   (table) => [index("activity_outbox_created_idx").on(table.createdAt)],
 );
 
-// Singleton scan cursor over the durable transcription log. Account changes
-// reset it; newly settled rows are materialized directly without changing it.
+// Desktop retains device history across accounts. Account changes re-enroll
+// successful rows; restarting the same account preserves their pending flags.
 export const activityMaterializationState = sqliteTable(
   "activity_materialization_state",
   {
     id: integer("id").primaryKey(),
     accountId: text("account_id"),
-    transcriptionCursor: integer("transcription_cursor").notNull().default(0),
   },
   (table) => [
     check(
       "activity_materialization_state_singleton_check",
       sql`${table.id} = 1`,
-    ),
-    check(
-      "activity_materialization_state_cursor_check",
-      sql`${table.transcriptionCursor} >= 0`,
     ),
   ],
 );
@@ -455,7 +471,6 @@ export interface AppSettingsData {
   // + offline render. Re-validated against RemoteConfigSchema on read.
   remoteConfig?: {
     config?: RemoteConfig;
-    lastFetchedAt?: string; // ISO 8601
   };
   dataMigrations?: {
     notesLexical?: number;
@@ -466,9 +481,20 @@ export interface AppSettingsData {
 
 // Notes table
 export const notes = sqliteTable("notes", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+  id: text("id")
+    .primaryKey()
+    .notNull()
+    .$defaultFn(() => createEntityId("note")),
+  accountId: text("account_id"),
+  localOnly: integer("local_only", { mode: "boolean" })
+    .notNull()
+    .default(false),
+  syncError: text("sync_error"),
   title: text("title").notNull(),
-  content: text("content").default(""), // Store the actual text content
+  content: text("content").default(""), // Authoritative body when contentFormat is markdown-v1
+  contentFormat: text("content_format").notNull().default("legacy"),
+  legacyContent: text("legacy_content"), // Retained pre-migration content column
+  migrationError: text("migration_error"),
   icon: text("icon"), // Store the icon (emoji) associated with the note
   createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()
@@ -483,7 +509,7 @@ export const yjsUpdates = sqliteTable(
   "yjs_updates",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
-    noteId: integer("note_id")
+    noteId: text("note_id")
       .notNull()
       .references(() => notes.id, { onDelete: "cascade" }),
     updateData: blob("update_data", { mode: "buffer" }).notNull(), // Binary data stored as Buffer

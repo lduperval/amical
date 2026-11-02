@@ -1,3 +1,6 @@
+import type { NoteSaveOrigin } from "../notes/types";
+import type { NoteBody, NoteSaveResult, NoteBodyChange } from "../notes/types";
+
 declare global {
   interface Window {
     electronAPI: ElectronAPI;
@@ -45,9 +48,15 @@ export interface ElectronAPI {
   // External link handling
   openExternal: (url: string) => Promise<void>;
 
-  // Notes API - Yjs synchronization only
+  // Local Markdown note persistence
   notes: {
-    saveYjsUpdate: (noteId: number, update: ArrayBuffer) => Promise<void>;
-    loadYjsUpdates: (noteId: number) => Promise<ArrayBuffer[]>;
+    loadBody: (noteId: string) => NoteBody;
+    saveBody: (
+      noteId: string,
+      markdown: string,
+      expectedRemoteVersion?: number | null,
+      origin?: NoteSaveOrigin,
+    ) => NoteSaveResult;
+    onBodyChange: (callback: (change: NoteBodyChange) => void) => () => void;
   };
 }

@@ -18,7 +18,7 @@ import { REAL_TIMER_HOST, type ShellTimerHost } from "../shell";
  * This adapter turns that traffic into port facts:
  *
  *   captureStarted      → recorderReady   (public recording = capture-confirmed)
- *   captureStartFailed  → recorderFailed
+ *   captureFailed  → recorderFailed
  *   no frame within the dead-mic bound of recorderReady → noAudioDetected
  *   final chunk, or the drain bound after stop() → recorderClosed, exactly once
  *
@@ -83,7 +83,7 @@ export interface RecorderAdapterDeps {
 export interface RecorderAdapter extends RecorderPort {
   /** Renderer capture handshake (tRPC-reported). */
   captureStarted(session: SessionId): void;
-  captureStartFailed(session: SessionId, cause: string): void;
+  captureFailed(session: SessionId, cause: string): void;
   /** Renderer PCM traffic ("audio-data-chunk" IPC). */
   handleAudioChunk(
     session: SessionId,
@@ -92,7 +92,7 @@ export interface RecorderAdapter extends RecorderPort {
   ): Promise<void>;
   /** Resolves once the session's custody has closed and its writer settled
    * (immediately, with an empty outcome, for unknown sessions). The stamp
-   * orders behind this — a settled row always has settled custody (D25). */
+   * waits for this with a bounded fallback; a stamp can precede completion (D25). */
   whenCustodySettled(session: SessionId): Promise<CustodyOutcome>;
 }
 
@@ -146,18 +146,13 @@ export function createRecorderAdapter(
    * app-scope registry, resolved when the session's writer closes. The
    * registry outlives the session scope by design (E1 pin 7): the stamp
    * usually asks AFTER custody settled, and a commit retry can ask again
-   * seconds later — so retention is FIFO-bounded, never settle-deleted. */
+   * seconds later — so results are retained until the app exits. */
   const custodyDeferred = new Map<
     SessionId,
     Deferred.Deferred<CustodyOutcome>
   >();
 
   function openCustodyWaiter(session: SessionId): void {
-    while (custodyDeferred.size > 8) {
-      const oldest = custodyDeferred.keys().next().value;
-      if (oldest === undefined) break;
-      custodyDeferred.delete(oldest);
-    }
     custodyDeferred.set(
       session,
       Effect.runSync(Deferred.make<CustodyOutcome>()),
@@ -334,7 +329,7 @@ export function createRecorderAdapter(
       });
     },
 
-    captureStartFailed(session, cause): void {
+    captureFailed(session, cause): void {
       const capture = current(session);
       if (!capture) return;
       closeCustody(capture);
