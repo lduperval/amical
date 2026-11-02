@@ -1,5 +1,9 @@
 import { runPromise as runTelemetryPromise } from "../../runtime/telemetry-runtime";
-import { expectObligation, recordPhase } from "../../telemetry/dictation-trace";
+import {
+  expectObligation,
+  recordPhase,
+  recordPoint,
+} from "../../telemetry/dictation-trace";
 import { Deferred, Effect } from "effect";
 import { logger } from "../../logger";
 import { StreamingWavWriter } from "../../../utils/streaming-wav-writer";
@@ -37,8 +41,8 @@ export interface AmbianceContext {
 
 /**
  * Session ambiance: the native start/stop sounds and system-audio mute.
- * `beepGate` resolves once captured frames are no longer contaminated by the
- * start sound (immediately when dictation sounds are muted).
+ * `beepGate` resolves when the start-sound wait ends, on completion or timeout
+ * (immediately when dictation sounds are muted). `done` tracks native completion.
  */
 export interface RecorderAmbiance {
   begin(session: SessionId): {
@@ -109,6 +113,7 @@ export interface CustodyOutcome {
 interface CaptureState {
   session: SessionId;
   startCalledAt: number;
+  acceptedFrame: boolean;
   phase: "starting" | "capturing" | "draining" | "closed";
   beepPending: boolean;
   ambianceContext: AmbianceContext | null;
@@ -153,10 +158,7 @@ export function createRecorderAdapter(
   >();
 
   function openCustodyWaiter(session: SessionId): void {
-    custodyDeferred.set(
-      session,
-      Effect.runSync(Deferred.make<CustodyOutcome>()),
-    );
+    custodyDeferred.set(session, Deferred.makeUnsafe<CustodyOutcome>());
   }
 
   function settleCustodyWaiter(
@@ -164,7 +166,7 @@ export function createRecorderAdapter(
     outcome: CustodyOutcome,
   ): void {
     const waiter = custodyDeferred.get(session);
-    if (waiter) Deferred.unsafeDone(waiter, Effect.succeed(outcome));
+    if (waiter) Deferred.doneUnsafe(waiter, Effect.succeed(outcome));
   }
 
   function current(session: SessionId): CaptureState | null {
@@ -254,10 +256,15 @@ export function createRecorderAdapter(
 
   return {
     start(session): void {
+      // Include capture timings even when the user cancels during mic acquisition.
+      // The renderer's final timing batch settles this after capture stops.
+      expectObligation(session, "capture.timings");
+      expectObligation(session, "lifecycle.recorder-start-gate-wait");
       openCustodyWaiter(session);
       const capture: CaptureState = {
         session,
         startCalledAt: Date.now(),
+        acceptedFrame: false,
         phase: "starting",
         beepPending: true,
         ambianceContext: null,
@@ -278,6 +285,12 @@ export function createRecorderAdapter(
         .catch(() => undefined)
         .then(() => {
           capture.beepPending = false;
+          recordPhase(
+            session,
+            "lifecycle.recorder-start-gate-wait",
+            capture.startCalledAt,
+            Date.now(),
+          );
         });
       void done
         .then((context) => {
@@ -359,15 +372,18 @@ export function createRecorderAdapter(
 
       if (capture.phase === "starting") return;
 
-      // Frames captured while the start beep was audible are dropped so the
-      // beep is not transcribed; the final chunk always survives so a stop
-      // mid-beep still finalizes.
+      // Drop ordinary frames while the start-sound gate is pending. The final
+      // chunk always survives so a stop during the gate still finalizes.
       if (capture.beepPending && !isFinalChunk) return;
 
       // Draining accepts every in-flight frame (D19): the tail of speech is
       // still arriving through IPC after stop; only custody close drops.
 
       if (chunk.length > 0) {
+        if (!capture.acceptedFrame) {
+          capture.acceptedFrame = true;
+          recordPoint(session, "lifecycle.first-accepted-frame");
+        }
         if (!capture.writer) {
           const audioFile = deps.audioFilePathFor(session);
           capture.audioFile = audioFile;

@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -10,7 +12,7 @@ concurrency:
 
 jobs:
   typecheck:
-    name: Type Check
+    name: Type Check and Tests
     runs-on: macos-latest
     permissions:
       contents: read
@@ -21,10 +23,10 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Fetch pull request base
-        if: github.event_name == 'pull_request'
+      - name: Fetch comparison base
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: git fetch --no-tags --depth=1 origin "$BASE_SHA"
 
       - name: Setup pnpm
@@ -47,13 +49,13 @@ jobs:
       - name: Type check
         run: pnpm type:check
 
-      - name: Verify lifecycle contract artifact
-        run: pnpm --filter @amical/desktop test:lifecycle-contract
+      - name: Test desktop (including lifecycle contract)
+        run: pnpm --filter @amical/desktop test
 
       - name: Verify lifecycle contract version
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: pnpm --filter @amical/desktop verify:lifecycle-contract-version "$BASE_SHA"
 
   test_linux_helper:
@@ -84,6 +86,14 @@ jobs:
             cargo test --features ${{ matrix.feature }}
           fi
 
+      - name: Check and pack GNOME Shell extension
+        if: matrix.feature == 'gnome_ext'
+        working-directory: packages/native-helpers/linux-helper
+        run: |
+          node --input-type=module --check < gnome-extension/amical@amical.ai/extension.js
+          node scripts/pack-gnome-extension.mjs /tmp/amical-gnome-extension
+          test -s /tmp/amical-gnome-extension/amical@amical.ai.shell-extension.zip
+
   build_desktop:
     name: Build Desktop (${{ matrix.os }} ${{ matrix.arch }})
     needs: typecheck
@@ -99,10 +109,10 @@ jobs:
             runner: macos-latest
           - os: windows
             arch: x64
-            runner: windows-2022
+            runner: windows-2025-vs2026
           - os: windows
             arch: arm64
-            runner: windows-11-arm
+            runner: windows-11-vs2026-arm
 
     steps:
       - name: Checkout
@@ -122,6 +132,17 @@ jobs:
           node-version: "24.1.0"
           architecture: ${{ matrix.arch }}
           cache: pnpm
+
+      - name: Install Vulkan SDK
+        if: matrix.os == 'windows' && matrix.arch == 'x64'
+        shell: pwsh
+        env:
+          VULKAN_VERSION: 1.4.363.0
+        run: |
+          curl.exe -fL -o "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+          & "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" --root "C:\VulkanSDK\$env:VULKAN_VERSION" --accept-licenses --default-answer --confirm-command install
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=C:\VulkanSDK\$env:VULKAN_VERSION"
+          Add-Content $env:GITHUB_PATH "C:\VulkanSDK\$env:VULKAN_VERSION\Bin"
 
       - name: Install dependencies
         env:
@@ -155,6 +176,12 @@ jobs:
           GGML_NATIVE: OFF
         run: pnpm --filter @amical/whisper-wrapper build:native
 
+      - name: Build whisper native binaries (vulkan)
+        if: matrix.os == 'windows' && matrix.arch == 'x64'
+        env:
+          GGML_NATIVE: OFF
+        run: pnpm --filter @amical/whisper-wrapper build:native:vulkan
+
       - name: Smoke test whisper native binary
         run: pnpm --filter @amical/whisper-wrapper test:load
 
@@ -165,6 +192,7 @@ jobs:
       - name: Package desktop app (no signing)
         working-directory: apps/desktop
         env:
+          NODE_OPTIONS: --max-old-space-size=6144
           AMICAL_E2E_PACKAGE: "1"
           SKIP_CODESIGNING: "true"
           SKIP_NOTARIZATION: "true"

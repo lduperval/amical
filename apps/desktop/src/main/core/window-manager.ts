@@ -10,6 +10,10 @@ import path from "node:path";
 import { logger } from "../logger";
 import type { SettingsService } from "../../services/settings-service";
 import { NotesWindowController } from "./windows/notes-window-controller";
+import {
+  getLinuxWindowingMode,
+  type LinuxWindowingMode,
+} from "../../utils/linux-windowing";
 import { EventEmitter } from "events";
 import { Effect, Layer } from "effect";
 import { WindowManagerTag, SettingsServiceTag } from "../runtime/tags";
@@ -39,10 +43,32 @@ interface WidgetDragState {
   windowStart: Electron.Rectangle;
 }
 
+/** Exact title the GNOME Shell extension matches to manage the widget. */
+export const WIDGET_WINDOW_TITLE = "Amical Widget";
+
+export interface LinuxWidgetPlacementRequest {
+  title: string;
+  x: number;
+  y: number;
+  above: boolean;
+  sticky: boolean;
+}
+
+/**
+ * Compositor-side window placement for native Wayland, where a client cannot
+ * move, stack, or pin its own windows. Backed by the Amical GNOME Shell
+ * extension through the native helper (see AppManager).
+ */
+export interface LinuxWidgetPlacer {
+  place(
+    request: LinuxWidgetPlacementRequest,
+  ): Promise<{ success: boolean; found: boolean; message?: string }>;
+}
+
 export class WindowManager extends EventEmitter {
   private static readonly WIDGET_MAX_WIDTH = 640 as const;
   private static readonly WIDGET_MAX_HEIGHT = 320 as const;
-  private static readonly WIDGET_IDLE_WIDTH = 96 as const;
+  private static readonly WIDGET_LINUX_PADDING = 5 as const;
   private static readonly WIDGET_IDLE_HEIGHT = 24 as const;
   private static readonly WIDGET_BOTTOM_MARGIN = 8 as const;
   private static readonly WIDGET_LINUX_BOTTOM_CLEARANCE = 24 as const;
@@ -56,8 +82,14 @@ export class WindowManager extends EventEmitter {
   private cursorPollingInterval: NodeJS.Timeout | null = null;
   private cursorDisplayCandidateId: number | null = null;
   private widgetPosition: WidgetPosition | null = null;
+  private widgetExpanded = false;
+  // Startup fallback until the renderer reports the pill's actual dimensions.
+  private widgetControlSize = { width: 108, height: 24 };
   private widgetDragState: WidgetDragState | null = null;
   private themeListenerSetup: boolean = false;
+  private linuxWindowingMode: LinuxWindowingMode = "none";
+  private linuxWidgetPlacer: LinuxWidgetPlacer | null = null;
+  private linuxPlacementProblemLogged = false;
 
   // On Windows, inset from all edges to allow taskbar auto-hide detection
   private readonly widgetEdgeInset = process.platform === "win32" ? 4 : 0;
@@ -90,8 +122,24 @@ export class WindowManager extends EventEmitter {
     const inset = this.widgetEdgeInset;
     const maxWidth = Math.max(0, workArea.width - inset * 2);
     const maxHeight = Math.max(0, workArea.height - inset * 2);
-    const width = Math.min(WindowManager.WIDGET_MAX_WIDTH, maxWidth);
-    const height = Math.min(WindowManager.WIDGET_MAX_HEIGHT, maxHeight);
+    // Native Wayland does not reliably honor Electron window shapes. Keep
+    // the actual surface small so its transparent area cannot swallow clicks.
+    const compact =
+      this.usesCompositorWidgetPlacement() && !this.widgetExpanded;
+    const width = Math.min(
+      compact
+        ? this.getWidgetControlSize().width +
+            WindowManager.WIDGET_LINUX_PADDING * 2
+        : WindowManager.WIDGET_MAX_WIDTH,
+      maxWidth,
+    );
+    const height = Math.min(
+      compact
+        ? this.getWidgetControlSize().height +
+            WindowManager.WIDGET_LINUX_PADDING * 2
+        : WindowManager.WIDGET_MAX_HEIGHT,
+      maxHeight,
+    );
     const x = workArea.x + Math.round((workArea.width - width) / 2);
     // GNOME's dock is commonly configured at the bottom. Keep a visible gap
     // beyond the compositor-reported work area so the control does not look
@@ -117,8 +165,14 @@ export class WindowManager extends EventEmitter {
       y:
         bounds.y +
         bounds.height -
-        WindowManager.WIDGET_BOTTOM_MARGIN -
-        Math.round(WindowManager.WIDGET_IDLE_HEIGHT / 2),
+        (process.platform === "linux"
+          ? WindowManager.WIDGET_LINUX_PADDING
+          : WindowManager.WIDGET_BOTTOM_MARGIN) -
+        Math.round(
+          (process.platform === "linux"
+            ? this.getWidgetControlSize().height
+            : WindowManager.WIDGET_IDLE_HEIGHT) / 2,
+        ),
     };
   }
 
@@ -187,11 +241,11 @@ export class WindowManager extends EventEmitter {
       return trackedDisplay.workArea;
     }
 
-    const cursorDisplay = screen.getDisplayNearestPoint(
-      screen.getCursorScreenPoint(),
-    );
-    this.widgetDisplayId = cursorDisplay.id;
-    return cursorDisplay.workArea;
+    const fallbackDisplay = this.usesCompositorWidgetPlacement()
+      ? screen.getPrimaryDisplay()
+      : screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    this.widgetDisplayId = fallbackDisplay.id;
+    return fallbackDisplay.workArea;
   }
 
   /**
@@ -234,6 +288,10 @@ export class WindowManager extends EventEmitter {
   // build this manager, which also makes single-construction structural.
   private constructor(private settingsService: SettingsService) {
     super();
+    this.linuxWindowingMode = getLinuxWindowingMode({
+      platform: process.platform,
+      ozonePlatform: app.commandLine?.getSwitchValue?.("ozone-platform"),
+    });
     this.notesWindowController = new NotesWindowController({
       settingsService: this.settingsService,
       onWindowCreated: (window) => this.emit("window-created", window),
@@ -344,9 +402,17 @@ export class WindowManager extends EventEmitter {
    *                       the renderer isn't ready to receive IPC navigation events.
    *                       If window already exists, caller should use webContents.send()
    *                       to navigate (renderer is already loaded and listening).
+   * @param options.inactive - Show a NEW window without activating the app
+   *                           (no focus change, no macOS Space switch).
    */
-  async createOrShowMainWindow(initialRoute?: string): Promise<void> {
+  async createOrShowMainWindow(
+    initialRoute?: string,
+    { inactive = false }: { inactive?: boolean } = {},
+  ): Promise<void> {
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+      if (this.mainWindow.isMinimized()) {
+        this.mainWindow.restore();
+      }
       this.mainWindow.show();
       this.mainWindow.focus();
       return;
@@ -366,6 +432,7 @@ export class WindowManager extends EventEmitter {
     this.mainWindow = new BrowserWindow({
       width: 1200,
       height: windowHeight,
+      show: !inactive,
       frame: true,
       backgroundColor:
         process.platform === "darwin" ? "#00000000" : colors.backgroundColor,
@@ -390,6 +457,9 @@ export class WindowManager extends EventEmitter {
         contextIsolation: true,
       },
     });
+    if (inactive) {
+      this.mainWindow.showInactive();
+    }
 
     const shouldOpenExternally = (url: string) => {
       try {
@@ -468,9 +538,16 @@ export class WindowManager extends EventEmitter {
 
   async createWidgetWindow(): Promise<void> {
     const initialCursorPoint = screen.getCursorScreenPoint();
-    const initialDisplay = screen.getDisplayNearestPoint(initialCursorPoint);
     const uiSettings = await this.settingsService.getUISettings();
     this.widgetPosition = uiSettings.widgetPosition ?? null;
+    // Wayland does not expose global cursor coordinates to Electron. Keep
+    // the monitor selected by a compositor drag, defaulting to the primary.
+    const initialDisplay = this.usesCompositorWidgetPlacement()
+      ? (screen
+          .getAllDisplays()
+          .find((display) => display.id === this.widgetPosition?.displayId) ??
+        screen.getPrimaryDisplay())
+      : screen.getDisplayNearestPoint(initialCursorPoint);
     const widgetBounds = this.getWidgetBoundsForWorkArea(
       initialDisplay.workArea,
     );
@@ -486,6 +563,7 @@ export class WindowManager extends EventEmitter {
     this.widgetWindow = new BrowserWindow({
       show: false,
       ...widgetBounds,
+      title: WIDGET_WINDOW_TITLE,
       frame: false,
       transparent: true,
       alwaysOnTop: true,
@@ -548,6 +626,11 @@ export class WindowManager extends EventEmitter {
     });
 
     this.widgetWindow.on("moved", () => {
+      // Native Wayland getBounds() reports client-local coordinates. Only
+      // the extension's WidgetMoved event has the real desktop position.
+      if (this.usesCompositorWidgetPlacement()) {
+        return;
+      }
       if (!this.widgetWindow || this.widgetWindow.isDestroyed()) {
         return;
       }
@@ -596,7 +679,9 @@ export class WindowManager extends EventEmitter {
   // chrome differences (fixed 1160 non-resizable vs resizable main), close
   // semantics (onboarding close = quit vs main close = hide to tray), and the
   // production relaunch on completion, which a shared window doesn't remove.
-  async createOrShowOnboardingWindow(): Promise<void> {
+  async createOrShowOnboardingWindow({
+    inactive = false,
+  }: { inactive?: boolean } = {}): Promise<void> {
     if (this.onboardingWindow && !this.onboardingWindow.isDestroyed()) {
       this.onboardingWindow.show();
       this.onboardingWindow.focus();
@@ -618,6 +703,7 @@ export class WindowManager extends EventEmitter {
     this.onboardingWindow = new BrowserWindow({
       width: 1160,
       height: windowHeight,
+      show: !inactive,
       backgroundColor: colors.backgroundColor,
       frame: true,
       titleBarStyle: "hidden",
@@ -636,6 +722,9 @@ export class WindowManager extends EventEmitter {
         contextIsolation: true,
       },
     });
+    if (inactive) {
+      this.onboardingWindow.showInactive();
+    }
 
     if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
       const devUrl = new URL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
@@ -684,7 +773,128 @@ export class WindowManager extends EventEmitter {
     if (this.widgetWindow && !this.widgetWindow.isDestroyed()) {
       this.widgetWindow.showInactive();
       this.reassertWidgetZOrder();
+      // Native Wayland maps a fresh toplevel on every show, placed by the
+      // compositor; ask the shell extension to put it back where it belongs.
+      if (this.usesCompositorWidgetPlacement()) {
+        this.applyWidgetBounds(
+          this.getWidgetBoundsForWorkArea(
+            this.getActiveWidgetDisplayWorkArea(),
+          ),
+        );
+      }
     }
+  }
+
+  getLinuxWindowingMode(): LinuxWindowingMode {
+    return this.linuxWindowingMode ?? "none";
+  }
+
+  setLinuxWidgetPlacer(placer: LinuxWidgetPlacer | null): void {
+    this.linuxWidgetPlacer = placer;
+    this.linuxPlacementProblemLogged = false;
+  }
+
+  /**
+   * On native Wayland the main process cannot move the widget: setBounds only
+   * updates Electron's idea of the window, and getBounds reports 0,0 after
+   * every show. Placement then goes through the compositor (GNOME Shell
+   * extension) and the compositor reports moves back (handleExternalWidgetMove).
+   */
+  private usesCompositorWidgetPlacement(): boolean {
+    return (
+      process.platform === "linux" && this.getLinuxWindowingMode() === "wayland"
+    );
+  }
+
+  private applyWidgetBounds(bounds: Electron.Rectangle): void {
+    if (!this.widgetWindow || this.widgetWindow.isDestroyed()) {
+      return;
+    }
+    if (!this.usesCompositorWidgetPlacement()) {
+      this.widgetWindow.setBounds(bounds);
+      return;
+    }
+    const currentBounds = this.widgetWindow.getBounds();
+    if (
+      currentBounds.width !== bounds.width ||
+      currentBounds.height !== bounds.height
+    ) {
+      this.widgetWindow.setSize(bounds.width, bounds.height);
+    }
+    const placer = this.linuxWidgetPlacer;
+    if (!placer) {
+      this.logPlacementProblemOnce(
+        "No compositor placement available: the widget keeps the position GNOME gave it",
+      );
+      return;
+    }
+    void placer
+      .place({
+        title: WIDGET_WINDOW_TITLE,
+        x: bounds.x,
+        y: bounds.y,
+        above: true,
+        sticky: true,
+      })
+      .then((result) => {
+        if (result.success) {
+          this.linuxPlacementProblemLogged = false;
+          logger.main.debug("Widget placed through the compositor", {
+            x: bounds.x,
+            y: bounds.y,
+            found: result.found,
+          });
+        } else {
+          this.logPlacementProblemOnce(
+            result.message ?? "compositor placement request failed",
+          );
+        }
+      })
+      .catch((error) => {
+        this.logPlacementProblemOnce(
+          error instanceof Error ? error.message : String(error),
+        );
+      });
+  }
+
+  private logPlacementProblemOnce(message: string): void {
+    if (this.linuxPlacementProblemLogged) {
+      return;
+    }
+    this.linuxPlacementProblemLogged = true;
+    logger.main.warn("Floating widget cannot be positioned on native Wayland", {
+      message,
+    });
+  }
+
+  /**
+   * The compositor moved (or the user dragged) the widget: remember the new
+   * anchor the same way a main-process drag would. Coordinates come from the
+   * GNOME Shell extension's WidgetMoved signal.
+   */
+  async handleExternalWidgetMove(move: {
+    title: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }): Promise<void> {
+    if (move.title !== WIDGET_WINDOW_TITLE) {
+      return;
+    }
+    if (!this.widgetWindow || this.widgetWindow.isDestroyed()) {
+      return;
+    }
+    const anchor = this.getWidgetAnchor({
+      x: move.x,
+      y: move.y,
+      width: move.width,
+      height: move.height,
+    });
+    const display = screen.getDisplayNearestPoint(anchor);
+    this.widgetDisplayId = display.id;
+    this.cursorDisplayCandidateId = null;
+    await this.persistWidgetAnchor(anchor, display);
   }
 
   private async showIdleWidgetAfterLoad(window: BrowserWindow): Promise<void> {
@@ -710,8 +920,7 @@ export class WindowManager extends EventEmitter {
   }
 
   /**
-   * Restore a visible widget's native ordering.
-   * Keep the visibility guard: moveTop() can show a hidden window on Windows.
+   * Restore a visible widget's always-on-top status and native ordering.
    */
   reassertWidgetZOrder(): void {
     if (
@@ -720,7 +929,7 @@ export class WindowManager extends EventEmitter {
       !this.widgetWindow.isDestroyed() &&
       this.widgetWindow.isVisible()
     ) {
-      this.widgetWindow.moveTop();
+      this.widgetWindow.setAlwaysOnTop(true, "screen-saver");
     }
   }
 
@@ -763,6 +972,9 @@ export class WindowManager extends EventEmitter {
   }
 
   private setupFocusBasedDisplayDetection(): void {
+    if (this.usesCompositorWidgetPlacement()) {
+      return;
+    }
     // Listen for any window focus events to detect active display changes
     app.on("browser-window-focus", (_event, window) => {
       if (!window || window.isDestroyed()) return;
@@ -786,16 +998,14 @@ export class WindowManager extends EventEmitter {
       this.cursorDisplayCandidateId = null;
 
       // Update widget window bounds to new display
-      if (this.widgetWindow && !this.widgetWindow.isDestroyed()) {
-        this.widgetWindow.setBounds(
-          this.getWidgetBoundsForWorkArea(focusedWindowDisplay.workArea),
-        );
-      }
+      this.applyWidgetBounds(
+        this.getWidgetBoundsForWorkArea(focusedWindowDisplay.workArea),
+      );
     });
   }
 
   private startCursorPolling(): void {
-    if (this.cursorPollingInterval) {
+    if (this.usesCompositorWidgetPlacement() || this.cursorPollingInterval) {
       return;
     }
 
@@ -835,7 +1045,7 @@ export class WindowManager extends EventEmitter {
       this.cursorDisplayCandidateId = null;
 
       // Update widget window bounds to new display
-      this.widgetWindow.setBounds(
+      this.applyWidgetBounds(
         this.getWidgetBoundsForWorkArea(cursorDisplay.workArea),
       );
     }, 200);
@@ -850,11 +1060,15 @@ export class WindowManager extends EventEmitter {
     if (!this.widgetWindow || this.widgetWindow.isDestroyed()) return;
 
     // Get the current display based on cursor position
-    const cursorPoint = screen.getCursorScreenPoint();
-    const currentDisplay = screen.getDisplayNearestPoint(cursorPoint);
+    const currentDisplay = this.usesCompositorWidgetPlacement()
+      ? (screen
+          .getAllDisplays()
+          .find((display) => display.id === this.widgetDisplayId) ??
+        screen.getPrimaryDisplay())
+      : screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
 
     // Update window bounds to match new display's work area
-    this.widgetWindow.setBounds(
+    this.applyWidgetBounds(
       this.getWidgetBoundsForWorkArea(currentDisplay.workArea),
     );
     this.widgetDisplayId = currentDisplay.id;
@@ -868,6 +1082,11 @@ export class WindowManager extends EventEmitter {
 
   beginWidgetDrag(point: Electron.Point): void {
     if (!this.widgetWindow || this.widgetWindow.isDestroyed()) {
+      return;
+    }
+    // Native Wayland: the renderer's drag handle starts a compositor move
+    // instead; the extension reports the result (handleExternalWidgetMove).
+    if (this.usesCompositorWidgetPlacement()) {
       return;
     }
 
@@ -914,7 +1133,15 @@ export class WindowManager extends EventEmitter {
 
     const anchor = this.getWidgetAnchor(window.getBounds());
     const display = screen.getDisplayNearestPoint(anchor);
+    await this.persistWidgetAnchor(anchor, display);
+  }
+
+  private async persistWidgetAnchor(
+    anchor: Electron.Point,
+    display: Electron.Display,
+  ): Promise<void> {
     const position: WidgetPosition = {
+      displayId: display.id,
       xRatio: Math.min(
         1,
         Math.max(0, (anchor.x - display.workArea.x) / display.workArea.width),
@@ -924,6 +1151,17 @@ export class WindowManager extends EventEmitter {
         Math.max(0, (anchor.y - display.workArea.y) / display.workArea.height),
       ),
     };
+    // The compositor also reports the moves we requested ourselves; skip the
+    // settings write when nothing changed beyond rounding.
+    const previous = this.widgetPosition;
+    if (
+      previous &&
+      previous.displayId === position.displayId &&
+      Math.abs(previous.xRatio - position.xRatio) < 0.002 &&
+      Math.abs(previous.yRatio - position.yRatio) < 0.002
+    ) {
+      return;
+    }
     this.widgetPosition = position;
 
     try {
@@ -940,48 +1178,78 @@ export class WindowManager extends EventEmitter {
     }
   }
 
-  setWidgetIgnoreMouseEvents(ignore: boolean): void {
+  setWidgetIgnoreMouseEvents(ignore: boolean, expanded = !ignore): void {
     if (!this.widgetWindow || this.widgetWindow.isDestroyed()) {
       return;
     }
 
     if (process.platform === "linux") {
-      // The Linux build runs through XWayland because the widget needs native
-      // positioning. Use the X11 input shape for the idle state: the visible
-      // pill receives clicks directly, while the rest of this large,
-      // transparent window falls through to applications behind it. This is
-      // independent of cursor coordinate scaling, unlike hover polling.
-      const bounds = this.widgetWindow.getBounds();
-      const shape = ignore
-        ? [this.getLinuxIdleWidgetShape(bounds)]
-        : [{ x: 0, y: 0, width: bounds.width, height: bounds.height }];
-      this.widgetWindow.setShape(shape);
+      const needsExpandedWindow = !ignore && expanded;
+      if (this.widgetExpanded !== needsExpandedWindow) {
+        this.widgetExpanded = needsExpandedWindow;
+        if (this.usesCompositorWidgetPlacement()) {
+          this.applyWidgetBounds(
+            this.getWidgetBoundsForWorkArea(
+              this.getActiveWidgetDisplayWorkArea(),
+            ),
+          );
+        }
+      }
+      // XWayland supports shapes. Hover/drag keep the input shape around
+      // the pill; only larger content needs the entire window. Native Wayland
+      // uses the compact physical surface above instead of relying on setShape.
+      if (!this.usesCompositorWidgetPlacement()) {
+        const bounds = this.widgetWindow.getBounds();
+        this.widgetWindow.setShape(
+          needsExpandedWindow
+            ? [{ x: 0, y: 0, width: bounds.width, height: bounds.height }]
+            : [this.getLinuxIdleWidgetShape(bounds)],
+        );
+      }
       this.widgetWindow.setIgnoreMouseEvents(false);
     } else {
       this.widgetWindow.setIgnoreMouseEvents(ignore, { forward: true });
     }
   }
 
+  private getWidgetControlSize(): { width: number; height: number } {
+    return this.widgetControlSize ?? { width: 108, height: 24 };
+  }
+
+  setWidgetControlSize(size: { width: number; height: number }): void {
+    if (process.platform !== "linux") return;
+    const previous = this.getWidgetControlSize();
+    if (previous.width === size.width && previous.height === size.height)
+      return;
+    this.widgetControlSize = size;
+    if (
+      !this.widgetWindow ||
+      this.widgetWindow.isDestroyed() ||
+      this.widgetExpanded
+    )
+      return;
+
+    if (this.usesCompositorWidgetPlacement()) {
+      this.applyWidgetBounds(
+        this.getWidgetBoundsForWorkArea(this.getActiveWidgetDisplayWorkArea()),
+      );
+    } else {
+      this.widgetWindow.setShape([
+        this.getLinuxIdleWidgetShape(this.widgetWindow.getBounds()),
+      ]);
+    }
+  }
+
   private getLinuxIdleWidgetShape(
     bounds: Electron.Rectangle,
   ): Electron.Rectangle {
-    const horizontalPadding = 8;
-    const verticalPadding = 6;
-
+    const { width, height } = this.getWidgetControlSize();
+    const padding = WindowManager.WIDGET_LINUX_PADDING;
     return {
-      x:
-        Math.round((bounds.width - WindowManager.WIDGET_IDLE_WIDTH) / 2) -
-        horizontalPadding,
-      y:
-        bounds.height -
-        WindowManager.WIDGET_BOTTOM_MARGIN -
-        WindowManager.WIDGET_IDLE_HEIGHT -
-        verticalPadding,
-      width: WindowManager.WIDGET_IDLE_WIDTH + horizontalPadding * 2,
-      height:
-        WindowManager.WIDGET_IDLE_HEIGHT +
-        WindowManager.WIDGET_BOTTOM_MARGIN +
-        verticalPadding,
+      x: Math.round((bounds.width - width) / 2) - padding,
+      y: bounds.height - height - padding * 2,
+      width: width + padding * 2,
+      height: height + padding * 2,
     };
   }
 

@@ -1,4 +1,4 @@
-import { Effect, Ref } from "effect";
+import { Cause, Effect, Option, Ref } from "effect";
 import type { TranscriptionOutput } from "../../core/pipeline-types";
 import { logger } from "../../../main/logger";
 import { retryOnceAfterAuthenticationRequired } from "../../../services/auth-retry";
@@ -37,6 +37,7 @@ import {
 import type { DictationSkill } from "./dictation-skill";
 import { float32ToPcmS16le } from "../../utils/pcm-encoding";
 import { resolveSessionSkills } from "./skill-resolution";
+import { baseLanguageCode } from "../../../constants/languages";
 
 // Success response from cloud API (HTTP 200)
 interface CloudTranscriptionSuccess {
@@ -95,7 +96,7 @@ export class AmicalCloudHttpTransport {
     audioData: Float32Array,
     speechProbability: number,
   ): CloudProviderEffect<TranscriptionOutput> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       yield* this.bufferHttpFrameEffect(audioData, speechProbability);
       return yield* this.transcribeFromBufferEffect();
     });
@@ -108,7 +109,7 @@ export class AmicalCloudHttpTransport {
    * the provider, so re-buffering it here would duplicate audio.
    */
   transcribeFromBufferEffect(): CloudProviderEffect<TranscriptionOutput> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const shouldTranscribe = yield* this.shouldTranscribeEffect();
       if (!shouldTranscribe) {
         return { text: "" };
@@ -132,7 +133,7 @@ export class AmicalCloudHttpTransport {
     enableFormatting: boolean,
     isFinal = false,
   ): CloudProviderEffect<TranscriptionOutput> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const { combinedAudio, vadProbs } = yield* Ref.modify(
         this.state,
         (
@@ -221,7 +222,7 @@ export class AmicalCloudHttpTransport {
   }
 
   private refreshTokenEffect(force = false): CloudProviderEffect<void> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const auth = yield* CloudAuth;
       yield* auth.refreshTokenIfNeeded(force);
     });
@@ -240,7 +241,7 @@ export class AmicalCloudHttpTransport {
     // Empty audio is the text-only finalize path; preserve the
     // original "" wire shape so the server's default float32 path keeps working.
     const hasAudio = audioData.length > 0;
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const config = yield* CloudConfig;
       const audioPayload = hasAudio
         ? Buffer.from(float32ToPcmS16le(audioData)).toString("base64")
@@ -264,7 +265,9 @@ export class AmicalCloudHttpTransport {
               audioData: audioPayload,
               audioFormat: hasAudio ? "pcm_s16le" : undefined,
               vadProbs: this.CLOUD_CLIENT_VAD_ENABLED ? vadProbs : undefined,
-              languages: snapshot.currentLanguages,
+              languages: snapshot.httpLockedLanguage
+                ? [snapshot.httpLockedLanguage]
+                : snapshot.currentLanguages,
               vocabulary: snapshot.currentVocabulary,
               previousTranscription: snapshot.currentAggregatedTranscription,
               formatting: {
@@ -394,7 +397,7 @@ export class AmicalCloudHttpTransport {
       skills: preResolvedSkills,
     } = request;
 
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       yield* this.failIfClosedEffect();
       const requestSnapshot =
         snapshot ?? (yield* requestSnapshotEffect(this.state));
@@ -444,16 +447,24 @@ export class AmicalCloudHttpTransport {
               "Authentication required, attempting token refresh and retry",
             );
           }).pipe(
-            Effect.zipRight(
+            Effect.andThen(
               this.refreshTokenEffect(true).pipe(
-                Effect.catchAll((refreshError) =>
-                  Effect.sync(() => {
+                Effect.catchCause((cause) => {
+                  const failure = Cause.findErrorOption(cause);
+                  if (
+                    Option.isNone(failure) ||
+                    Cause.hasDies(cause) ||
+                    Cause.hasInterrupts(cause)
+                  ) {
+                    return Effect.failCause(cause);
+                  }
+                  return Effect.sync(() => {
                     logger.transcription.error(
                       "Token refresh failed:",
-                      refreshError,
+                      failure.value,
                     );
                   }).pipe(
-                    Effect.zipRight(
+                    Effect.andThen(
                       Effect.fail(
                         new AuthenticationRequired({
                           message:
@@ -462,11 +473,11 @@ export class AmicalCloudHttpTransport {
                         }),
                       ),
                     ),
-                  ),
-                ),
+                  );
+                }),
               ),
             ),
-            Effect.zipRight(this.failIfClosedEffect()),
+            Effect.andThen(this.failIfClosedEffect()),
           ),
       );
     });
@@ -485,7 +496,7 @@ export class AmicalCloudHttpTransport {
         : state,
     );
 
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       yield* this.failIfClosedEffect();
 
       // Register before token lookup. Auth remains non-interruptible, but a
@@ -549,11 +560,36 @@ export class AmicalCloudHttpTransport {
           transcription: result.transcription,
         });
       });
+      yield* this.lockLanguageEffect(snapshot.currentLanguages, result);
 
       return {
         text: result.transcription,
         detectedLanguage: result.language,
       };
     }).pipe(Effect.ensuring(releaseRequest));
+  }
+
+  /**
+   * Fix the session language after the first response that has text and a
+   * language: later requests send only the selected code for that language
+   * (e.g. ["en-GB", "de"] and "en" → ["en-GB"]). A language that is not
+   * selected leaves the full list in place.
+   */
+  private lockLanguageEffect(
+    selectedLanguages: string[],
+    result: CloudTranscriptionSuccess,
+  ): Effect.Effect<void> {
+    const reported = result.language?.trim().toLowerCase();
+    const match = selectedLanguages.find(
+      (code) => baseLanguageCode(code) === reported,
+    );
+    if (!match || !result.transcription.trim()) {
+      return Effect.void;
+    }
+    return Ref.update(this.state, (state) =>
+      state.httpLockedLanguage
+        ? state
+        : { ...state, httpLockedLanguage: match },
+    );
   }
 }

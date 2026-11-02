@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
+import { observable } from "@trpc/server/observable";
 import { dialog } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -13,7 +14,8 @@ import {
   getTranscriptionsCount,
   searchTranscriptions,
 } from "../../db/transcriptions.js";
-import { getLifetimeStats } from "../../db/daily-stats.js";
+import { getLifetimeStats } from "../../db/dictation-stats";
+import { dictationStatsEvents } from "../../db/dictation-stats-events";
 import { deleteAudioFilesForTranscriptions } from "../../utils/audio-file-cleanup.js";
 
 // Input schemas
@@ -38,9 +40,29 @@ const ReportTranscriptionSchema = z.object({
 });
 
 export const transcriptionsRouter = createRouter({
-  getLifetimeStats: procedure.query(async () => {
-    return await getLifetimeStats();
-  }),
+  requestStatsRefresh: procedure.mutation(({ ctx }) =>
+    ctx.services.activityReportingService.requestSummaryRefresh(),
+  ),
+
+  getLifetimeStats: procedure.query(() => getLifetimeStats()),
+
+  onStatsChanged: procedure
+    .input(z.object({ visible: z.boolean() }))
+    .subscription(({ ctx, input }) => {
+      return observable<{ changed: true }>((emit) => {
+        const onChanged = () => emit.next({ changed: true });
+        dictationStatsEvents.on("changed", onChanged);
+        const stopWatching = input.visible
+          ? ctx.services.activityReportingService.watchSummary()
+          : undefined;
+        // Also repair updates missed before attachment or during reconnection.
+        onChanged();
+        return () => {
+          dictationStatsEvents.off("changed", onChanged);
+          stopWatching?.();
+        };
+      });
+    }),
 
   // Get transcriptions list with pagination and filtering
   getTranscriptions: procedure

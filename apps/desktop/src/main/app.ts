@@ -10,17 +10,15 @@ import { showFatalStartupDialog } from "./fatal-startup-dialog";
 import { AppManager } from "./core/app-manager";
 import { isWindows } from "../utils/platform";
 import { ServiceManager } from "./managers/service-manager";
+import { isSilentStart } from "./launch-options";
 
-// The rendering workaround runs synchronously in main.ts. Log the requested
-// mode here, once the logger is available, plus Chromium's actual feature
-// status when it reports GPU information (also covers software rendering).
+// Linux display selection runs synchronously in main.ts. Log the requested
+// rendering mode here, once the logger is available, plus Chromium's actual
+// feature status when it reports GPU information.
 if (process.platform === "linux") {
   logger.main.info("Linux rendering configured in early startup", {
-    softwareRendering: !process.argv.includes("--enable-gpu"),
+    softwareRendering: process.argv.includes("--disable-gpu"),
     ozonePlatform: app.commandLine.getSwitchValue("ozone-platform"),
-    gpuCompositingDisabled: app.commandLine.hasSwitch(
-      "disable-gpu-compositing",
-    ),
   });
   app.on("gpu-info-update", () => {
     logger.main.info("Linux GPU feature status", app.getGPUFeatureStatus());
@@ -132,15 +130,18 @@ if (isWindows()) {
   app.setAppUserModelId("ai.amical.desktop");
 }
 
-// Register the amical:// protocol
+// Register the deep-link protocol. Unpackaged dev builds use their own scheme
+// so they never take amical:// (and its OAuth callbacks) from an installed
+// Amical.
+const deepLinkScheme = app.isPackaged ? "amical" : "amical-dev";
 if (process.defaultApp) {
   if (process.argv.length >= 2) {
-    app.setAsDefaultProtocolClient("amical", process.execPath, [
+    app.setAsDefaultProtocolClient(deepLinkScheme, process.execPath, [
       process.argv[1],
     ]);
   }
 } else {
-  app.setAsDefaultProtocolClient("amical");
+  app.setAsDefaultProtocolClient(deepLinkScheme);
 }
 
 // Enforce single instance
@@ -159,6 +160,8 @@ const appManager = new AppManager(serviceManager);
 // Track initialization state for deep link handling
 let isInitialized = false;
 let pendingDeepLink: string | null = null;
+let pendingOpen = false;
+let hasActivated = false;
 
 // Handle protocol on macOS
 app.on("open-url", (event, url) => {
@@ -181,13 +184,17 @@ app.on("second-instance", (_event, commandLine) => {
     return;
   }
 
-  // Someone tried to run a second instance, we should focus our window instead.
-  if (isInitialized) {
-    appManager.handleSecondInstance();
+  const url = commandLine.find((arg) => arg.startsWith(`${deepLinkScheme}://`));
+  // Deep-link handling opens its own window; do not open it twice.
+  if (!url && !isSilentStart(commandLine)) {
+    if (isInitialized) {
+      appManager.handleSecondInstance();
+    } else {
+      pendingOpen = true;
+    }
   }
 
   // Check if this is a protocol launch on Windows/Linux
-  const url = commandLine.find((arg) => arg.startsWith("amical://"));
   if (url) {
     if (isInitialized) {
       appManager.handleDeepLink(url);
@@ -199,14 +206,22 @@ app.on("second-instance", (_event, commandLine) => {
 
 app.whenReady().then(async () => {
   try {
-    await appManager.initialize();
+    // Native macOS login items cannot pass arguments; use the OS launch signal.
+    const silentStart =
+      isSilentStart() ||
+      (process.platform === "darwin" &&
+        app.getLoginItemSettings().wasOpenedAtLogin);
+    await appManager.initialize({ silentStart });
     isInitialized = true;
 
     // Process any deep link that was received before initialization completed
     if (pendingDeepLink) {
       appManager.handleDeepLink(pendingDeepLink);
       pendingDeepLink = null;
+    } else if (pendingOpen) {
+      appManager.handleSecondInstance();
     }
+    pendingOpen = false;
   } catch (error) {
     logger.main.error("Application failed to initialize", { error });
     const telemetryService = serviceManager.getTelemetryService();
@@ -224,8 +239,48 @@ app.whenReady().then(async () => {
     app.quit();
   }
 });
-app.on("will-quit", () => appManager.cleanup());
+// Electron does not wait for async will-quit work: once the handler returns,
+// the process exits and cuts off cleanup (service releases, the final
+// telemetry send). Hold the quit, run cleanup once with a bounded wait, then
+// exit. app.exit() keeps a pending app.relaunch().
+const QUIT_CLEANUP_TIMEOUT_MS = 3000;
+let quitCleanupStarted = false;
+app.on("will-quit", async (event) => {
+  // Also hold a repeated quit request so it cannot cut the running cleanup
+  // short; the exit below ends the process.
+  event.preventDefault();
+  if (quitCleanupStarted) return;
+  quitCleanupStarted = true;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      appManager.cleanup(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          logger.main.warn("Quit cleanup timed out, exiting anyway", {
+            timeoutMs: QUIT_CLEANUP_TIMEOUT_MS,
+          });
+          resolve();
+        }, QUIT_CLEANUP_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (error) {
+    logger.main.error("Quit cleanup failed", { error });
+  } finally {
+    clearTimeout(timer);
+    app.exit(0);
+  }
+});
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
-app.on("activate", () => appManager.handleActivate());
+app.on("activate", () => {
+  // Initial launch activation belongs to initialize(). Remember subsequent
+  // Dock clicks even if services are still starting.
+  if (isInitialized) {
+    void appManager.handleActivate();
+  } else if (hasActivated) {
+    pendingOpen = true;
+  }
+  hasActivated = true;
+});

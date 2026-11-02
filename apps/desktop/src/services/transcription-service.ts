@@ -54,6 +54,7 @@ import {
 import {
   recordChunkAggregate,
   recordDefect,
+  recordPhase,
   recordPoint,
   type ChunkAggregate,
 } from "../main/telemetry/dictation-trace";
@@ -77,6 +78,54 @@ type StreamingChunkOptions = {
   audioChunk: Float32Array;
   isInstruct?: boolean;
 };
+
+/** Separate queue time from work time without changing the lock's
+ * interruption-safe handoff. Only slow waits are retained by the trace. */
+const withTracedChunkLock = <A, E, R>(
+  lock: TokenLock,
+  use: Effect.Effect<A, E, R>,
+  sessionId: string,
+  chunkIndex: number,
+  name: "transcription.vad-lock-wait" | "transcription.chunk-lock-wait",
+): Effect.Effect<A, E, R> =>
+  Effect.suspend(() => {
+    const startedAt = Date.now();
+    const timerStartedAt = performance.now();
+    return withLock(
+      lock,
+      Effect.suspend(() => {
+        recordPhase(sessionId, name, startedAt, Date.now(), {
+          durationMs: performance.now() - timerStartedAt,
+          chunkIndex,
+          slow: true,
+        });
+        return use;
+      }),
+    );
+  });
+
+/** Retain slow chunk work without allocating an Effect span for every frame. */
+const withTracedChunkWork = <A, E, R>(
+  work: Effect.Effect<A, E, R>,
+  sessionId: string,
+  chunkIndex: number,
+  name: "transcription.vad-process" | "transcription.provider-transcribe",
+): Effect.Effect<A, E, R> =>
+  Effect.suspend(() => {
+    const startedAt = Date.now();
+    const timerStartedAt = performance.now();
+    return work.pipe(
+      Effect.tap(() =>
+        Effect.sync(() =>
+          recordPhase(sessionId, name, startedAt, Date.now(), {
+            durationMs: performance.now() - timerStartedAt,
+            chunkIndex,
+            slow: true,
+          }),
+        ),
+      ),
+    );
+  });
 
 /** Prepared transcript + descriptive fields, nothing persisted. */
 export type ResolvedStreamingSession = {
@@ -588,7 +637,7 @@ export class TranscriptionService {
       stats.lastChunkAt = now;
     }
     return liveSession.processChunkEffect(
-      this.chunkEffect(liveSession, options),
+      this.chunkEffect(liveSession, options, stats?.count ?? 0),
     );
   }
 
@@ -603,6 +652,7 @@ export class TranscriptionService {
   private chunkEffect(
     liveSession: LiveTranscriptionSession,
     options: StreamingChunkOptions,
+    chunkIndex: number,
   ): Effect.Effect<string, DictationError> {
     const { sessionId, audioChunk } = options;
     const service = this;
@@ -625,7 +675,7 @@ export class TranscriptionService {
 
       if (audioChunk.length > 0 && service.vadService) {
         const vadStartedAt = performance.now();
-        const vadOutcome = yield* withLock(
+        const vadOutcome = yield* withTracedChunkLock(
           service.vadLock,
           Effect.uninterruptible(
             Effect.suspend(() => {
@@ -648,7 +698,14 @@ export class TranscriptionService {
                 },
                 catch: (error) => error,
               }).pipe(
-                Effect.catchAll((error) => {
+                (work) =>
+                  withTracedChunkWork(
+                    work,
+                    sessionId,
+                    chunkIndex,
+                    "transcription.vad-process",
+                  ),
+                Effect.catch((error) => {
                   // A VAD error degrades this chunk exactly like a missing
                   // VAD degrades the whole session: assume speech instead of
                   // letting one bad frame fail the session terminally.
@@ -664,6 +721,9 @@ export class TranscriptionService {
               );
             }),
           ),
+          sessionId,
+          chunkIndex,
+          "transcription.vad-lock-wait",
         );
         {
           const stats = service.chunkStats.get(sessionId);
@@ -689,7 +749,7 @@ export class TranscriptionService {
         return "";
       }
 
-      return yield* withLock(
+      return yield* withTracedChunkLock(
         service.transcriptionLock,
         Effect.uninterruptible(
           Effect.gen(function* () {
@@ -700,6 +760,7 @@ export class TranscriptionService {
             let session = liveSession.materializedSession;
             if (!session) {
               const materializeStartedAt = performance.now();
+              const materializeStartedAtMs = Date.now();
               const context = yield* Effect.tryPromise({
                 try: () =>
                   loadDictationContext({
@@ -747,7 +808,7 @@ export class TranscriptionService {
                       liveSession.reportTerminalFailure(error),
                   }),
                 catch: (error) => error,
-              }).pipe(Effect.catchAll(failOrDie));
+              }).pipe(Effect.catch(failOrDie));
 
               session = {
                 context,
@@ -773,6 +834,13 @@ export class TranscriptionService {
                 stats.modelId = session.speechModelId;
                 stats.provider = session.providerSession.name;
               }
+              recordPhase(
+                sessionId,
+                "transcription.session-setup",
+                materializeStartedAtMs,
+                Date.now(),
+                { durationMs: performance.now() - materializeStartedAt },
+              );
             }
             // Transcribe chunk (flush is done separately in finalizeSession)
             const transcribeStartedAt = performance.now();
@@ -787,7 +855,14 @@ export class TranscriptionService {
                   ),
                 }),
               catch: (error) => error,
-            }).pipe(Effect.catchAll(failOrDie));
+            }).pipe(Effect.catch(failOrDie), (work) =>
+              withTracedChunkWork(
+                work,
+                sessionId,
+                chunkIndex,
+                "transcription.provider-transcribe",
+              ),
+            );
             {
               const stats = service.chunkStats.get(sessionId);
               if (stats) {
@@ -830,6 +905,9 @@ export class TranscriptionService {
             return session.transcriptionResults.join("");
           }),
         ),
+        sessionId,
+        chunkIndex,
+        "transcription.chunk-lock-wait",
       );
     });
   }
@@ -918,9 +996,10 @@ export class TranscriptionService {
       // cause is reported once (the session bookkeeping dedups values the
       // chunk arm or an out-of-band channel already own), loudly.
       if (Exit.isFailure(exit)) {
-        const fresh = Array.from(Cause.defects(exit.cause)).filter(
-          (defect) => !liveSession.wasDefectReported(defect),
-        );
+        const fresh = exit.cause.reasons
+          .filter(Cause.isDieReason)
+          .map((reason) => reason.defect)
+          .filter((defect) => !liveSession.wasDefectReported(defect));
         if (fresh.length > 0) {
           liveSession.markDefectsReported(fresh);
           logger.transcription.error("Dictation resolve defect", {
@@ -955,14 +1034,14 @@ export class TranscriptionService {
     const terminalGate = Effect.try({
       try: () => liveSession.throwIfTerminalFailure(),
       catch: (error) => error,
-    }).pipe(Effect.catchAll(failOrDie));
+    }).pipe(Effect.catch(failOrDie));
 
     return Effect.gen(function* () {
       yield* Effect.tryPromise({
         try: () => liveSession.drainAdmittedChunks(),
         catch: (error) => error,
       }).pipe(
-        Effect.catchAll(failOrDie),
+        Effect.catch(failOrDie),
         Effect.withSpan("resolve.drain", { attributes: { sessionId } }),
       );
       const session = liveSession.materializedSession;
@@ -1002,7 +1081,7 @@ export class TranscriptionService {
                   liveSession.signal,
                 ),
               catch: (error) => error,
-            }).pipe(Effect.catchAll(failOrDie));
+            }).pipe(Effect.catch(failOrDie));
             yield* terminalGate;
             session.detectedLanguage = mergeDetectedLanguage(
               session.detectedLanguage,

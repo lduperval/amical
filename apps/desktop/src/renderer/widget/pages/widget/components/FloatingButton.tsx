@@ -1,6 +1,6 @@
-import React, { useState, useRef, useEffect } from "react";
-import { NotebookPen, Check, X, Pencil } from "lucide-react";
-import { Waveform } from "@/components/Waveform";
+import React, { useState, useRef, useEffect, type RefObject } from "react";
+import { NotebookPen, Check, X, Pencil, GripVertical } from "lucide-react";
+import { RippleWaveform } from "@/components/RippleWaveform";
 import type { RecordingStatus } from "@/hooks/useRecording";
 import { useFeatureFlag } from "@/hooks/useFeatureFlag";
 import { api } from "@/trpc/react";
@@ -8,7 +8,6 @@ import { NOTE_WINDOW_FEATURE_FLAG } from "@/utils/feature-flags";
 import { setPassThroughReason } from "../../../pass-through";
 import { useTranslation } from "react-i18next";
 
-const NUM_WAVEFORM_BARS = 6; // Fewer bars to make room for stop button
 const DEBOUNCE_DELAY = 100; // milliseconds
 
 // Stop = commit: finish + transcribe + paste
@@ -66,27 +65,9 @@ const ProcessingIndicator: React.FC<{ isDraft?: boolean }> = ({ isDraft }) => (
   </div>
 );
 
-// Separate component for the waveform visualization
-const WaveformVisualization: React.FC<{
-  isRecording: boolean;
-  audioLevels: number[];
-}> = ({ isRecording, audioLevels }) => (
-  <>
-    {Array.from({ length: NUM_WAVEFORM_BARS }).map((_, index) => (
-      <Waveform
-        key={index}
-        isRecording={isRecording}
-        level={audioLevels[index] ?? 0}
-        baseHeight={70}
-        silentHeight={20}
-      />
-    ))}
-  </>
-);
-
 interface FloatingButtonProps {
   recordingStatus: RecordingStatus;
-  audioLevels: number[];
+  audioLevelRef: RefObject<number>;
   startRecording: () => Promise<void>;
   stopRecording: () => Promise<void>;
   dismissRecording: () => Promise<void>;
@@ -94,7 +75,7 @@ interface FloatingButtonProps {
 
 export const FloatingButton: React.FC<FloatingButtonProps> = ({
   recordingStatus,
-  audioLevels,
+  audioLevelRef,
   startRecording,
   stopRecording,
   dismissRecording,
@@ -110,9 +91,36 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
     screenY: number;
   } | null>(null);
 
+  const controlRef = useRef<HTMLDivElement>(null);
+  const { mutate: setControlSize } = api.widget.setControlSize.useMutation();
   const openNotesWindow = api.widget.openNotesWindow.useMutation();
   const dragWidget = api.widget.drag.useMutation();
   const noteWindowFeatureFlag = useFeatureFlag(NOTE_WINDOW_FEATURE_FLAG);
+  const isLinux = window.electronAPI?.platform === "linux";
+  const linuxWindowingMode = api.widget.linuxWindowingMode.useQuery(undefined, {
+    enabled: isLinux,
+    staleTime: Infinity,
+  });
+  // Native Wayland: the main process cannot move the window, so the pill
+  // carries a grip that starts a compositor-driven move (app-region drag).
+  const usesCompositorDrag = isLinux && linuxWindowingMode.data === "wayland";
+
+  // Follow the rendered pill through hover, recording, and draft transitions.
+  // Report CSS pixels: Electron uses the same units for window dimensions.
+  useEffect(() => {
+    const control = controlRef.current;
+    if (!isLinux || !control) return;
+    const reportSize = () => {
+      const width = Math.ceil(control.getBoundingClientRect().width);
+      const height = Math.ceil(control.getBoundingClientRect().height);
+      if (width > 0 && height > 0) setControlSize({ width, height });
+    };
+    reportSize();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(reportSize);
+    observer.observe(control);
+    return () => observer.disconnect();
+  }, [isLinux, setControlSize]);
 
   // Release the hover pass-through reason if the FAB unmounts mid-hover (e.g.
   // a draft review takes over the widget), so it can't pin the window
@@ -137,7 +145,6 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
   const isNoteWindowEnabled = noteWindowFeatureFlag.enabled;
   // Draft (instruct) session: show a distinct indicator while dictating + processing.
   const isDraft = recordingStatus.isDraft;
-  const isLinux = window.electronAPI?.platform === "linux";
 
   // Track when recording state changes to "recording" after a click
   useEffect(() => {
@@ -229,7 +236,7 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
   const handleDragPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     // Reserve the primary button for recording. Middle-button dragging avoids
     // accidental movement during the control's normal click interaction.
-    if (event.button !== 1) {
+    if (event.button !== 1 || usesCompositorDrag) {
       return;
     }
 
@@ -294,15 +301,24 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
   const isWidgetActive = isLinux || isRecording || isStopping || isHovered;
   const showNotesAction =
     isNoteWindowEnabled && isHovered && !isRecording && !isStopping;
+  // The compositor-drag grip adds 12px so the content keeps its width.
   const sizeClass = !isWidgetActive
     ? "h-[8px] w-[48px]"
     : showNotesAction
-      ? "h-[24px] w-[124px]"
+      ? usesCompositorDrag
+        ? "h-[24px] w-[136px]"
+        : "h-[24px] w-[124px]"
       : isRecording
-        ? "h-[24px] w-[100px]"
+        ? usesCompositorDrag
+          ? "h-[24px] w-[112px]"
+          : "h-[24px] w-[100px]"
         : isDraft
-          ? "h-[24px] w-[116px]"
-          : "h-[24px] w-[96px]";
+          ? usesCompositorDrag
+            ? "h-[24px] w-[128px]"
+            : "h-[24px] w-[116px]"
+          : usesCompositorDrag
+            ? "h-[24px] w-[108px]"
+            : "h-[24px] w-[96px]";
 
   // Function to render widget content based on state
   const renderWidgetContent = () => {
@@ -322,10 +338,7 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
           </div>
           <div className="justify-center items-center flex flex-1 gap-1 min-w-0">
             {isDraft && <DraftPen />}
-            <WaveformVisualization
-              isRecording={isRecording}
-              audioLevels={audioLevels}
-            />
+            <RippleWaveform levelRef={audioLevelRef} isRecording />
           </div>
           <div className="h-full items-center flex mr-[5px]">
             <StopButton onClick={handleStopClick} />
@@ -344,10 +357,7 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
           aria-label={isRecording ? "Recording" : "Start recording"}
         >
           {isDraft && <DraftPen />}
-          <WaveformVisualization
-            isRecording={isRecording}
-            audioLevels={audioLevels}
-          />
+          <RippleWaveform levelRef={audioLevelRef} isRecording={isRecording} />
         </button>
 
         {showNotesAction && (
@@ -366,6 +376,7 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
 
   return (
     <div
+      ref={controlRef}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
       onPointerDown={handleDragPointerDown}
@@ -376,16 +387,25 @@ export const FloatingButton: React.FC<FloatingButtonProps> = ({
         if (event.button === 1) event.preventDefault();
       }}
       className={`
-        transition-all duration-200 ease-in-out
+        relative shrink-0 transition-all duration-200 ease-in-out
         ${sizeClass}
         bg-black/70 rounded-[24px] backdrop-blur-md ring-[1px] ring-black/60 shadow-[0px_0px_15px_0px_rgba(0,0,0,0.40)]
         before:content-[''] before:absolute before:inset-[1px] before:rounded-[23px] before:outline before:outline-white/15 before:pointer-events-none
-        mb-2 ${isDragging ? "cursor-grabbing" : "cursor-pointer"} select-none
+        ${isLinux ? "mb-[5px]" : "mb-2"} ${isDragging ? "cursor-grabbing" : "cursor-pointer"} select-none
       `}
       style={{ pointerEvents: "auto" }}
     >
       {isWidgetActive && (
         <div className="flex gap-[2px] h-full w-full justify-between">
+          {usesCompositorDrag && (
+            <div
+              className="h-full w-[12px] shrink-0 flex items-center justify-center cursor-grab active:cursor-grabbing text-white/60"
+              title="Drag to move"
+              style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+            >
+              <GripVertical className="w-[10px] h-[14px]" strokeWidth={2} />
+            </div>
+          )}
           {renderWidgetContent()}
         </div>
       )}

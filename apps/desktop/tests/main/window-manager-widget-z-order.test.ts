@@ -36,36 +36,45 @@ const createManager = () =>
   Object.create(WindowManager.prototype) as WindowManager;
 
 describe("WindowManager widget z-order recovery", () => {
-  it("moves a newly shown widget to the top on Windows", () => {
+  it("restores always-on-top status whenever the Windows widget is shown", () => {
     const manager = createManager();
-    const showInactive = vi.fn();
-    const moveTop = vi.fn();
+    let visible = false;
+    const showInactive = vi.fn(() => {
+      visible = true;
+    });
+    const setAlwaysOnTop = vi.fn();
     Reflect.set(manager, "widgetWindow", {
       isDestroyed: vi.fn(() => false),
-      isVisible: vi.fn(() => true),
+      isVisible: vi.fn(() => visible),
       showInactive,
-      moveTop,
+      setAlwaysOnTop,
     });
 
     manager.showWidget();
 
     expect(showInactive).toHaveBeenCalledOnce();
-    expect(moveTop).toHaveBeenCalledOnce();
+    expect(setAlwaysOnTop).toHaveBeenNthCalledWith(1, true, "screen-saver");
+
+    // Reassert even when the widget is already visible.
+    manager.showWidget();
+
+    expect(setAlwaysOnTop).toHaveBeenNthCalledWith(2, true, "screen-saver");
+    expect(setAlwaysOnTop).toHaveBeenCalledTimes(2);
   });
 
-  it("moves only an existing visible widget to the top", () => {
+  it("restores always-on-top status only for an existing visible widget", () => {
     const manager = createManager();
-    const moveTop = vi.fn();
+    const setAlwaysOnTop = vi.fn();
     const widgetWindow = {
       isDestroyed: vi.fn(() => false),
       isVisible: vi.fn(() => true),
-      moveTop,
+      setAlwaysOnTop,
     };
     Reflect.set(manager, "widgetWindow", widgetWindow);
 
     manager.reassertWidgetZOrder();
 
-    expect(moveTop).toHaveBeenCalledOnce();
+    expect(setAlwaysOnTop).toHaveBeenCalledOnce();
 
     widgetWindow.isVisible.mockReturnValue(false);
     manager.reassertWidgetZOrder();
@@ -74,7 +83,7 @@ describe("WindowManager widget z-order recovery", () => {
     widgetWindow.isDestroyed.mockReturnValue(true);
     manager.reassertWidgetZOrder();
 
-    expect(moveTop).toHaveBeenCalledOnce();
+    expect(setAlwaysOnTop).toHaveBeenCalledOnce();
   });
 
   it("does not change z-order outside Windows", () => {
@@ -83,16 +92,16 @@ describe("WindowManager widget z-order recovery", () => {
       value: "darwin",
     });
     const manager = createManager();
-    const moveTop = vi.fn();
+    const setAlwaysOnTop = vi.fn();
     Reflect.set(manager, "widgetWindow", {
       isDestroyed: vi.fn(() => false),
       isVisible: vi.fn(() => true),
-      moveTop,
+      setAlwaysOnTop,
     });
 
     manager.reassertWidgetZOrder();
 
-    expect(moveTop).not.toHaveBeenCalled();
+    expect(setAlwaysOnTop).not.toHaveBeenCalled();
   });
 
   it("uses an input shape so the idle Linux pill is directly clickable", () => {
@@ -113,16 +122,65 @@ describe("WindowManager widget z-order recovery", () => {
     manager.setWidgetIgnoreMouseEvents(true);
 
     expect(setShape).toHaveBeenCalledWith([
-      { x: 264, y: 282, width: 112, height: 38 },
+      { x: 261, y: 286, width: 118, height: 34 },
     ]);
     expect(setIgnoreMouseEvents).toHaveBeenCalledWith(false);
 
-    manager.setWidgetIgnoreMouseEvents(false);
+    // Hover/drag may make the pill interactive without enabling its backdrop.
+    manager.setWidgetIgnoreMouseEvents(false, false);
+    expect(setShape).toHaveBeenLastCalledWith([
+      { x: 261, y: 286, width: 118, height: 34 },
+    ]);
+
+    manager.setWidgetIgnoreMouseEvents(false, true);
 
     expect(setShape).toHaveBeenLastCalledWith([
       { x: 0, y: 0, width: 640, height: 320 },
     ]);
   });
+
+  it("updates the XWayland input shape to the rendered pill with equal padding", () => {
+    Object.defineProperty(process, "platform", {
+      configurable: true,
+      value: "linux",
+    });
+    const manager = createManager();
+    const setShape = vi.fn();
+    Reflect.set(manager, "widgetWindow", {
+      isDestroyed: () => false,
+      getBounds: () => ({ x: 0, y: 0, width: 640, height: 320 }),
+      setShape,
+    });
+    manager.setWidgetControlSize({ width: 96, height: 24 });
+    expect(setShape).toHaveBeenLastCalledWith([
+      { x: 267, y: 286, width: 106, height: 34 },
+    ]);
+  });
+
+  it.each(["win32", "darwin"])(
+    "preserves mouse forwarding on %s",
+    (platform) => {
+      Object.defineProperty(process, "platform", {
+        configurable: true,
+        value: platform,
+      });
+      const manager = createManager();
+      const setIgnoreMouseEvents = vi.fn();
+      const setShape = vi.fn();
+      Reflect.set(manager, "widgetWindow", {
+        isDestroyed: () => false,
+        setIgnoreMouseEvents,
+        setShape,
+      });
+      manager.setWidgetIgnoreMouseEvents(false, false);
+      manager.setWidgetIgnoreMouseEvents(true, false);
+      expect(setIgnoreMouseEvents.mock.calls).toEqual([
+        [false, { forward: true }],
+        [true, { forward: true }],
+      ]);
+      expect(setShape).not.toHaveBeenCalled();
+    },
+  );
 
   it("keeps the Linux widget clear of a bottom dock", () => {
     Object.defineProperty(process, "platform", {
@@ -213,7 +271,7 @@ describe("WindowManager widget z-order recovery", () => {
     expect(updateSettings).toHaveBeenCalledOnce();
     const saved = updateSettings.mock.calls[0][0].ui.widgetPosition;
     expect(saved.xRatio).toBeCloseTo(1160 / 1920);
-    expect(saved.yRatio).toBeCloseTo(896 / 1040);
+    expect(saved.yRatio).toBeCloseTo(899 / 1040);
 
     const restored = Reflect.get(manager, "getWidgetBoundsForWorkArea").call(
       manager,
@@ -221,7 +279,7 @@ describe("WindowManager widget z-order recovery", () => {
     );
     expect(restored).toEqual({
       x: 3147,
-      y: 906,
+      y: 907,
       width: 640,
       height: 320,
     });

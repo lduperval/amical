@@ -1,4 +1,4 @@
-import { app, ipcMain, shell } from "electron";
+import { app, ipcMain, shell, Notification } from "electron";
 import { initializeDatabase } from "../../db";
 import { ensureSeededSkills } from "../../db/skills";
 import { logger } from "../logger";
@@ -20,6 +20,7 @@ import { getMainFeatureFlagState } from "@/main/utils/feature-flags";
 import { NOTE_WINDOW_FEATURE_FLAG } from "@/utils/feature-flags";
 import { getApplicationLocale } from "@/i18n/application-locale";
 import { installRendererFailureTelemetry } from "../telemetry/renderer-failure-telemetry";
+import { getRelaunchArgs } from "../launch-options";
 
 export class AppManager {
   // Resolved ONCE in initialize() after the graph builds — AppManager's only
@@ -83,7 +84,9 @@ export class AppManager {
     }
   }
 
-  async initialize(): Promise<void> {
+  async initialize({
+    silentStart = false,
+  }: { silentStart?: boolean } = {}): Promise<void> {
     await this.initializeDatabase();
 
     await this.serviceManager.initialize();
@@ -123,13 +126,21 @@ export class AppManager {
     // Subscribe to settings changes for window updates
     this.setupSettingsEventListeners(this.settingsService);
 
+    // Dev launches (often scripted while the user works elsewhere) show their
+    // first window without taking focus (or switching Spaces on macOS; see
+    // main.ts). Later opens from the tray, Dock, a second launch, or a deep
+    // link still focus.
+    const startInactive = !app.isPackaged;
+
     if (onboardingCheck.needed) {
       // Suppress global shortcut commands while onboarding is open; the
       // dictation try-it steps lift this for their lifetime (see the
       // try-it-active-changed listener above).
       this.shortcutManager.setCommandsSuppressed(true);
       await onboardingService.startOnboardingFlow();
-      await this.windowManager.createOrShowOnboardingWindow();
+      await this.windowManager.createOrShowOnboardingWindow({
+        inactive: startInactive,
+      });
 
       // Closing the wizard is the third exit (besides completed/cancelled):
       // treat it as cancel — track abandonment and quit via the cancelled
@@ -142,7 +153,7 @@ export class AppManager {
         }
       });
     } else {
-      await this.setupWindows();
+      await this.setupWindows(silentStart, startInactive);
     }
 
     const locale = await this.setupMenu();
@@ -189,7 +200,7 @@ export class AppManager {
       if (shouldRelaunch) {
         // Production: relaunch app to reinitialize with new settings
         logger.main.info("Relaunching app after onboarding completion");
-        app.relaunch();
+        app.relaunch({ args: getRelaunchArgs() });
         app.quit();
       } else {
         // Development: just show the main app windows
@@ -256,10 +267,51 @@ export class AppManager {
     nativeBridge.on("helperEvent", (event: HelperEvent) => {
       if (event.type === "activeDisplayChanged") {
         this.windowManager.handleDisplayChange("foreground-window");
+      } else if (event.type === "widgetWindowMoved") {
+        // Native Wayland: the GNOME Shell extension reports where the user
+        // dragged the widget; the compositor is the only source of truth.
+        void this.windowManager.handleExternalWidgetMove(event.payload);
       }
     });
 
+    if (process.platform === "linux") {
+      this.windowManager.setLinuxWidgetPlacer({
+        place: (request) => nativeBridge.placeWidgetWindow(request),
+      });
+      void this.reportLinuxIntegrationStatus(nativeBridge);
+    }
+
     logger.main.info("Native bridge listeners connected in AppManager");
+  }
+
+  /**
+   * Log what the Linux helper can do on this desktop and tell the user when
+   * the build they installed needs the GNOME Shell extension that is not
+   * running. Paste failures repeat the reason, so this fires once.
+   */
+  private async reportLinuxIntegrationStatus(
+    nativeBridge: NativeBridge,
+  ): Promise<void> {
+    const status = await nativeBridge.getLinuxIntegrationStatus();
+    if (!status) {
+      return;
+    }
+    logger.main.info("Linux integration status", status);
+    if (status.inputMethod === "gnome_ext" && !status.extensionAvailable) {
+      logger.main.warn("GNOME Shell extension required but not running");
+      if (Notification.isSupported()) {
+        new Notification({
+          title: "Amical needs its GNOME Shell extension",
+          body:
+            status.message ??
+            "Install and enable the Amical Integration extension, log in again, then restart Amical.",
+        }).show();
+      }
+    } else if (status.clipboardStealsFocus) {
+      logger.main.warn(
+        "Clipboard access will briefly move focus away from the target window; install the Amical GNOME Shell extension to avoid it",
+      );
+    }
   }
 
   private async handleOpenNotesWindowShortcut(): Promise<void> {
@@ -307,10 +359,15 @@ export class AppManager {
     logger.main.info("Settings event listeners set up");
   }
 
-  private async setupWindows(): Promise<void> {
+  private async setupWindows(
+    silentStart = false,
+    inactive = false,
+  ): Promise<void> {
     await this.windowManager.ensureWidgetWindow();
 
-    this.windowManager.createOrShowMainWindow();
+    if (!silentStart) {
+      await this.windowManager.createOrShowMainWindow(undefined, { inactive });
+    }
 
     // Apply dock visibility based on user preference (macOS only)
     const preferences = await this.settingsService.getPreferences();

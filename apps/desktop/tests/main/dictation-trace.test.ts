@@ -10,9 +10,16 @@ import {
   recordChunkAggregate,
   recordPoint,
   recordDefect,
+  recordPhase,
+  tracePhase,
+  recordCapturePhases,
+  recordAudioContextTelemetry,
+  recordCaptureErrorName,
+  settleObligation,
 } from "../../src/main/telemetry/dictation-trace";
 import { runPromise } from "../../src/main/runtime/telemetry-runtime";
 import { NetworkFailure } from "../../src/types/errors";
+import type { AudioContextTelemetry } from "../../src/types/capture-timings";
 
 const flushed: Array<Record<string, unknown>> = [];
 
@@ -35,9 +42,118 @@ const span = (
 afterEach(() => {
   _resetDictationTraceForTests();
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe("dictation trace", () => {
+  const recovered: AudioContextTelemetry = {
+    recoveryAttemptCount: 1,
+    recoverySuccessCount: 1,
+    recoveryFailureCount: 0,
+    recoveryDurationMs: 125.125,
+  };
+
+  it("emits the latest cumulative recovery summary once without changing success", () => {
+    install();
+    openSessionTrace("recovered", {});
+    expectObligation("recovered", "capture.timings");
+    recordAudioContextTelemetry("recovered", {
+      ...recovered,
+      recoverySuccessCount: 0,
+      recoveryDurationMs: 0,
+    });
+    recordAudioContextTelemetry("recovered", recovered);
+    closeSessionTrace("recovered", { disposition: "success" });
+    expect(flushed).toHaveLength(0);
+    recordAudioContextTelemetry("recovered", recovered);
+    settleObligation("recovered", "capture.timings");
+    expect(flushed).toHaveLength(1);
+    expect(flushed[0]).toMatchObject({
+      disposition: "success",
+      audio_context_recovery_attempt_count: 1,
+      audio_context_recovery_success_count: 1,
+      audio_context_recovery_failure_count: 0,
+      audio_context_recovery_duration_ms: 125.125,
+      trace_spans: [],
+      trace_points: [],
+    });
+    expect(flushed[0]).not.toHaveProperty("failed_stage");
+    expect(flushed[0]).not.toHaveProperty("error_code");
+    expect(flushed[0]).not.toHaveProperty("audio_context_failure_operation");
+    expect(flushed[0]).not.toHaveProperty("audio_context_failure_state");
+  });
+
+  it("preserves context failure details alongside the existing terminal cause", () => {
+    install();
+    openSessionTrace("context-failure", {});
+    recordAudioContextTelemetry("context-failure", {
+      ...recovered,
+      recoveryAttemptCount: 2,
+      recoveryFailureCount: 1,
+      recoveryDurationMs: 210.5,
+      failureOperation: "recover",
+      failureState: "suspended",
+    });
+    recordCaptureErrorName("context-failure", "AudioContextResumeError");
+    closeSessionTrace("context-failure", {
+      disposition: "failure",
+      failedStage: "capture",
+      errorCode: "MICROPHONE_CAPTURE_FAILED",
+    });
+    expect(flushed).toHaveLength(1);
+    expect(flushed[0]).toMatchObject({
+      disposition: "failure",
+      failed_stage: "capture",
+      error_code: "MICROPHONE_CAPTURE_FAILED",
+      audio_context_recovery_attempt_count: 2,
+      audio_context_recovery_success_count: 1,
+      audio_context_recovery_failure_count: 1,
+      audio_context_recovery_duration_ms: 210.5,
+      audio_context_failure_operation: "recover",
+      audio_context_failure_state: "suspended",
+      capture_error_name: "AudioContextResumeError",
+    });
+  });
+
+  it("omits context properties for clean sessions and drops reports after flush", () => {
+    install();
+    openSessionTrace("clean", {});
+    closeSessionTrace("clean", { disposition: "success" });
+    recordAudioContextTelemetry("clean", recovered);
+    settleObligation("clean", "capture.timings");
+    expect(flushed).toHaveLength(1);
+    expect(
+      Object.keys(flushed[0]).filter((key) => key.startsWith("audio_context_")),
+    ).toEqual([]);
+    expect(flushed[0]).not.toHaveProperty("capture_error_name");
+  });
+
+  it("reports the latest observed capture format on the v2 event without leaking arbitrary fields", () => {
+    install();
+    openSessionTrace("channels", {});
+    for (let frame = 0; frame < 1_000; frame++) {
+      recordPoint("channels", "lifecycle.audio-capture", {
+        inputChannelCount: 2,
+        trackChannelCount: 2,
+        stereoDownmixEnabled: true,
+      });
+    }
+    recordPoint("channels", "lifecycle.audio-capture", {
+      inputChannelCount: 1,
+      trackChannelCount: 2,
+      stereoDownmixEnabled: true,
+      deviceId: "not-an-event-property",
+    });
+    closeSessionTrace("channels", { disposition: "empty" });
+    expect(flushed[0]).toMatchObject({
+      audio_input_channel_count: 1,
+      audio_track_channel_count: 2,
+      audio_stereo_downmix_enabled: true,
+    });
+    expect(flushed[0]).not.toHaveProperty("deviceId");
+    expect(flushed[0].trace_points).toEqual([]);
+  });
+
   it("a session with zero expected obligations flushes immediately at close", () => {
     install();
     openSessionTrace("s1", { mode: "dictate", model_id: "whisper-local" });
@@ -106,7 +222,7 @@ describe("dictation trace", () => {
       "s4",
       Effect.fail(Object.assign(new Error("late"), { code: "UNKNOWN" })).pipe(
         Effect.ignore,
-        Effect.zipRight(Effect.fail("resolve failed")),
+        Effect.andThen(Effect.fail("resolve failed")),
       ),
     ).catch(() => undefined);
     closeSessionTrace("s4", { disposition: "failure" });
@@ -247,5 +363,193 @@ describe("dictation trace", () => {
     openSessionTrace("s-clean", { mode: "dictate" });
     closeSessionTrace("s-clean", { disposition: "empty" });
     expect(flushed.at(-1)!).not.toHaveProperty("defect");
+  });
+});
+
+describe("v2 waterfall timing contract", () => {
+  it("uses shared epoch timestamps for main and renderer offsets", () => {
+    install();
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    openSessionTrace("clock", {});
+    recordPhase("clock", "transcription.provider-warmup", 980, 995);
+    recordPhase("clock", "resolve.flush", 1010, 1040);
+    recordCapturePhases("clock", [
+      {
+        name: "capture.get-user-media",
+        startedAtMs: 1020,
+        durationMs: 35,
+      },
+    ]);
+    now.mockReturnValue(1100);
+    recordPoint("clock", "lifecycle.recording-live");
+    closeSessionTrace("clock", { disposition: "success" });
+    expect(flushed[0]).toMatchObject({
+      session_duration_ms: 100,
+      provider_warmup_duration_ms: 15,
+      provider_warmup_start_offset_ms: -20,
+      resolve_flush_duration_ms: 30,
+      resolve_flush_start_offset_ms: 10,
+      capture_get_user_media_duration_ms: 35,
+      capture_get_user_media_start_offset_ms: 20,
+      recording_live_offset_ms: 100,
+    });
+    expect(flushed[0].trace_spans).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "capture.get-user-media",
+          start_offset_ms: 20,
+          duration_ms: 35,
+          process: "renderer",
+        }),
+      ]),
+    );
+  });
+
+  it("imports the whole capture batch before reporting completion can flush it", () => {
+    install();
+    vi.spyOn(Date, "now").mockReturnValue(100);
+    openSessionTrace("capture", {});
+    expectObligation("capture", "capture.timings");
+    closeSessionTrace("capture", { disposition: "success" });
+    recordCapturePhases("capture", [
+      {
+        name: "capture.get-user-media",
+        startedAtMs: 210,
+        durationMs: 30,
+      },
+      {
+        name: "capture.first-frame-wait",
+        startedAtMs: 160,
+        durationMs: 25,
+      },
+    ]);
+    expect(flushed).toHaveLength(0);
+    settleObligation("capture", "capture.timings");
+    expect(flushed[0].trace_spans).toEqual([
+      expect.objectContaining({
+        name: "capture.get-user-media",
+        start_offset_ms: 110,
+        duration_ms: 30,
+      }),
+      expect.objectContaining({
+        name: "capture.first-frame-wait",
+        start_offset_ms: 60,
+        duration_ms: 25,
+      }),
+    ]);
+  });
+
+  it("retains at most 64 repeated slow spans without losing one-time phases", () => {
+    install();
+    openSessionTrace("bounded", {});
+    recordPhase("bounded", "transcription.provider-transcribe", 0, 20, {
+      slow: true,
+      chunkIndex: 1,
+    });
+    for (let i = 0; i < 70; i++) {
+      recordPhase("bounded", "transcription.provider-transcribe", 0, 21, {
+        slow: true,
+        chunkIndex: i + 2,
+      });
+    }
+    recordPhase("bounded", "resolve.format", 40, 90);
+    closeSessionTrace("bounded", { disposition: "success" });
+    expect(flushed[0].trace_spans).toHaveLength(65);
+    expect(flushed[0].trace_dropped_slow_span_count).toBe(6);
+    expect(flushed[0].resolve_format_duration_ms).toBe(50);
+  });
+
+  it("settles a rejected promise without changing its error or adding a timing", async () => {
+    install();
+    openSessionTrace("promise", {});
+    let reject!: (reason: unknown) => void;
+    const error = new Error("private content");
+    const work = tracePhase(
+      "promise",
+      "context.accessibility-refresh",
+      () =>
+        new Promise<void>((_, fail) => {
+          reject = fail;
+        }),
+    );
+    const caught = work.catch((reason) => reason);
+    closeSessionTrace("promise", { disposition: "empty" });
+    expect(flushed).toHaveLength(0);
+    reject(error);
+    expect(await caught).toBe(error);
+    expect(flushed).toHaveLength(1);
+    expect(flushed[0].trace_spans).toEqual([]);
+    expect(flushed[0].trace_unsettled_obligations).toEqual([]);
+    expect(JSON.stringify(flushed[0])).not.toContain("private content");
+  });
+
+  it.each([false, true])(
+    "waits for overlapping promise phases; last rejects=%s",
+    async (lastRejects) => {
+      install();
+      openSessionTrace("overlap", {});
+      const pending = [
+        Promise.withResolvers<void>(),
+        Promise.withResolvers<void>(),
+      ];
+      const tasks = pending.map((phase) =>
+        tracePhase(
+          "overlap",
+          "context.accessibility-refresh",
+          () => phase.promise,
+        ),
+      );
+      const error = new Error("refresh failed");
+      const last = tasks[1].catch((reason) => reason);
+      closeSessionTrace("overlap", { disposition: "empty" });
+      pending[0].resolve();
+      await tasks[0];
+      expect(flushed).toHaveLength(0);
+      if (lastRejects) pending[1].reject(error);
+      else pending[1].resolve();
+      expect(await last).toBe(lastRejects ? error : undefined);
+      expect(flushed).toHaveLength(1);
+      expect(flushed[0].trace_spans).toHaveLength(lastRejects ? 1 : 2);
+      expect(flushed[0].trace_unsettled_obligations).toEqual([]);
+    },
+  );
+
+  it("identifies unfinished spans at grace and drops their late completion", async () => {
+    vi.useFakeTimers();
+    install();
+    openSessionTrace("incomplete", {});
+    const pending = Promise.withResolvers<void>();
+    const work = tracePhase(
+      "incomplete",
+      "transcription.provider-warmup",
+      () => pending.promise,
+    );
+    closeSessionTrace("incomplete", { disposition: "empty" });
+    vi.advanceTimersByTime(15_000);
+    expect(flushed[0].trace_unsettled_obligations).toEqual([
+      "transcription.provider-warmup",
+    ]);
+    expect(flushed[0].trace_spans).toEqual([]);
+    pending.resolve();
+    await work;
+    expect(flushed).toHaveLength(1);
+    expect(flushed[0].trace_spans).toEqual([]);
+  });
+
+  it("does not attribute a later session failure to recovered warmup work", async () => {
+    install();
+    openSessionTrace("recovered", {});
+    await tracePhase("recovered", "transcription.provider-warmup", async () => {
+      throw new Error("warmup");
+    }).catch(() => {});
+    closeSessionTrace("recovered", {
+      disposition: "failure",
+      failedStage: "capture",
+      errorCode: "MICROPHONE_PERMISSION_DENIED",
+    });
+    expect(flushed[0]).toMatchObject({
+      failed_stage: "capture",
+      error_code: "MICROPHONE_PERMISSION_DENIED",
+    });
   });
 });

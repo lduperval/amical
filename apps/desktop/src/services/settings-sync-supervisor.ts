@@ -5,11 +5,11 @@ import {
   Effect,
   Exit,
   Fiber,
-  FiberId,
   Option,
   Queue,
-  Runtime,
+  Context,
   Scope,
+  Semaphore,
 } from "effect";
 
 import { logger } from "../main/logger";
@@ -22,6 +22,7 @@ import {
 } from "./settings-sync-runner";
 import {
   SettingsSyncDependencyFailure,
+  SettingsSyncFlushFailed,
   SettingsSyncScopeRejected,
   type SettingsSyncAttemptError,
   type SettingsSyncLifecycleError,
@@ -33,35 +34,32 @@ import {
 import {
   adoptVisibleRows,
   beginUserSyncSession,
-  clearSyncState,
   deactivateOrganizationSyncScopes,
-  hasResumableUserSyncState,
   getNextNotePushAt,
   resetNoteUploadDelays,
   pauseSyncSession,
-  prepareVisibleRowsForFullSync,
   reconcileSyncScopes,
   registerLocalSyncMutationHandler,
-  resumeUserSyncSession,
   type SyncContext,
 } from "../db/sync";
 
 const POLL_INTERVAL_MS = 5 * 60_000;
 const EDIT_DEBOUNCE_MS = 750;
+const FLUSH_TIMEOUT_MS = 15_000;
 
 type LifecyclePhase = "stopped" | "starting" | "running" | "stopping";
 
 type RunningAttempt = {
   id: number;
   epoch: number;
-  fiber: Fiber.RuntimeFiber<void, never>;
+  fiber: Fiber.Fiber<void, never>;
 };
 
 type SupervisorState = {
   epoch: number;
   context: SyncContext | null;
   attempt: RunningAttempt | null;
-  debounce: Fiber.RuntimeFiber<void, never> | null;
+  debounce: Fiber.Fiber<void, never> | null;
   rerunRequested: boolean;
   authorizationBlocked: boolean;
   nextAttemptId: number;
@@ -79,6 +77,11 @@ type ControlEvent =
   | { _tag: "Authenticated"; epoch: number; accountId: string }
   | { _tag: "TokenRefreshed"; epoch: number; accountId: string }
   | { _tag: "LoggedOut" }
+  | {
+      _tag: "Flush";
+      epoch: number;
+      ack: Deferred.Deferred<void, SettingsSyncFlushFailed>;
+    }
   | {
       _tag: "BeforeLogout";
       epoch: number;
@@ -111,8 +114,8 @@ export class SettingsSyncSupervisor {
   private localMutationEpoch = 0;
   private localMutationDeadline = 0;
   private currentAttemptId: number | null = null;
-  private currentAttemptFiber: Fiber.RuntimeFiber<void, never> | null = null;
-  private currentDebounceFiber: Fiber.RuntimeFiber<void, never> | null = null;
+  private currentAttemptFiber: Fiber.Fiber<unknown, unknown> | null = null;
+  private currentDebounceFiber: Fiber.Fiber<void, never> | null = null;
   private initializeCompletion: Deferred.Deferred<
     void,
     SettingsSyncLifecycleError
@@ -169,10 +172,10 @@ export class SettingsSyncSupervisor {
   private constructor(
     private readonly authService: AuthService,
     private readonly client: SyncClient,
-    private readonly runtime: Runtime.Runtime<never>,
-    private serviceScope: Scope.CloseableScope,
+    private readonly context: Context.Context<never>,
+    private serviceScope: Scope.Closeable,
     private events: Queue.Queue<ControlEvent>,
-    private readonly dbSemaphore: Effect.Semaphore,
+    private readonly dbSemaphore: Semaphore.Semaphore,
     private supervisorDone: Deferred.Deferred<void>,
     private readonly notifyRenderers: () => void,
   ) {
@@ -187,17 +190,17 @@ export class SettingsSyncSupervisor {
     authService: AuthService,
     client: SyncClient,
     notifyRenderers: () => void,
-    runtime: Runtime.Runtime<never> = Runtime.defaultRuntime,
+    context: Context.Context<never> = Context.empty(),
   ): Effect.Effect<SettingsSyncSupervisor> {
     return Effect.gen(function* () {
       const serviceScope = yield* Scope.make();
       const events = yield* Queue.unbounded<ControlEvent>();
-      const dbSemaphore = yield* Effect.makeSemaphore(1);
+      const dbSemaphore = yield* Semaphore.make(1);
       const supervisorDone = yield* Deferred.make<void>();
       return new SettingsSyncSupervisor(
         authService,
         client,
-        runtime,
+        context,
         serviceScope,
         events,
         dbSemaphore,
@@ -209,7 +212,7 @@ export class SettingsSyncSupervisor {
 
   initialize(): Effect.Effect<void, SettingsSyncLifecycleError> {
     return Effect.uninterruptible(
-      Effect.gen(this, function* () {
+      Effect.gen({ self: this }, function* () {
         if (this.desiredRunning && this.initializeCompletion) {
           return yield* Deferred.await(this.initializeCompletion);
         }
@@ -238,7 +241,7 @@ export class SettingsSyncSupervisor {
           );
         });
         const operation = waitForShutdown
-          ? Deferred.await(waitForShutdown).pipe(Effect.zipRight(start))
+          ? Deferred.await(waitForShutdown).pipe(Effect.andThen(start))
           : start;
         const exit = yield* Effect.exit(operation);
         yield* Deferred.done(completion, exit);
@@ -263,9 +266,35 @@ export class SettingsSyncSupervisor {
     this.offer({ _tag: "Wake", epoch: this.boundaryEpoch });
   }
 
+  flush(): Effect.Effect<void, SettingsSyncFlushFailed> {
+    return Effect.gen({ self: this }, function* () {
+      if (this.lifecyclePhase !== "running") {
+        return yield* Effect.fail(
+          new SettingsSyncFlushFailed({ message: "Settings sync is stopped" }),
+        );
+      }
+      const ack = yield* Deferred.make<void, SettingsSyncFlushFailed>();
+      yield* Queue.offer(this.events, {
+        _tag: "Flush",
+        epoch: this.boundaryEpoch,
+        ack,
+      });
+      yield* Effect.raceFirst(
+        Deferred.await(ack),
+        Deferred.await(this.supervisorDone).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new SettingsSyncFlushFailed({ message: "Settings sync stopped" }),
+            ),
+          ),
+        ),
+      );
+    });
+  }
+
   shutdown(): Effect.Effect<void, SettingsSyncLifecycleError> {
     return Effect.uninterruptible(
-      Effect.gen(this, function* () {
+      Effect.gen({ self: this }, function* () {
         this.desiredRunning = false;
         this.lifecycleIntent += 1;
         this.initializeCompletion = null;
@@ -287,7 +316,7 @@ export class SettingsSyncSupervisor {
         this.unregisterListeners();
         const epoch = this.fenceBoundary(true, true);
         const operation = this.supervisorStarted
-          ? Effect.gen(this, function* () {
+          ? Effect.gen({ self: this }, function* () {
               const ack = yield* Deferred.make<
                 void,
                 SettingsSyncLifecycleError
@@ -333,7 +362,7 @@ export class SettingsSyncSupervisor {
     number,
     SettingsSyncLifecycleError
   > {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       if (this.runResourcesClosed) {
         this.serviceScope = yield* Scope.make();
         this.events = yield* Queue.unbounded<ControlEvent>();
@@ -355,7 +384,7 @@ export class SettingsSyncSupervisor {
   private runInitialization(
     generation: number,
   ): Effect.Effect<void, SettingsSyncLifecycleError> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       if (!this.lifecycleIsCurrent(generation, "starting")) return;
 
       const initialEpoch = this.boundaryEpoch;
@@ -461,13 +490,13 @@ export class SettingsSyncSupervisor {
   > {
     if (this.stopping || !this.initialized) return Effect.void;
     const epoch = this.fenceBoundary(true, true);
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const ack = yield* Deferred.make<void, SettingsSyncLifecycleError>();
       yield* Queue.offer(this.events, { _tag: "BeforeLogout", epoch, ack });
       yield* Effect.raceFirst(
         Deferred.await(ack),
         Deferred.await(this.supervisorDone).pipe(
-          Effect.zipRight(this.db(() => clearSyncState())),
+          Effect.andThen(this.withDb(Effect.sync(pauseSyncSession))),
           Effect.tap(() => Effect.sync(() => this.notifyRenderers())),
         ),
       );
@@ -477,9 +506,9 @@ export class SettingsSyncSupervisor {
   private fenceBoundary(pause: boolean, cancelDebounce: boolean): number {
     this.boundaryEpoch += 1;
     this.wakeAdmissionOpen = false;
-    this.currentAttemptFiber?.unsafeInterruptAsFork(FiberId.none);
+    this.currentAttemptFiber?.interruptUnsafe();
     if (cancelDebounce) {
-      this.currentDebounceFiber?.unsafeInterruptAsFork(FiberId.none);
+      this.currentDebounceFiber?.interruptUnsafe();
       this.currentDebounceFiber = null;
     }
     if (pause) {
@@ -511,7 +540,7 @@ export class SettingsSyncSupervisor {
                   ? Effect.void
                   : loop(exit.value.state);
               }
-              if (Cause.isInterrupted(exit.cause)) {
+              if (Cause.hasInterrupts(exit.cause)) {
                 return Effect.failCause(exit.cause);
               }
               return this.recoverSupervisorEvent(state, event, exit.cause).pipe(
@@ -529,7 +558,7 @@ export class SettingsSyncSupervisor {
     event: ControlEvent,
     cause: Cause.Cause<never>,
   ): Effect.Effect<SupervisorState> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       logger.main.error("Settings sync supervisor event failed", {
         error: Cause.squash(cause),
         event: event._tag,
@@ -539,7 +568,7 @@ export class SettingsSyncSupervisor {
         this.currentAttemptId !== null &&
         this.currentAttemptId !== state.attempt?.id
       ) {
-        this.currentAttemptFiber?.unsafeInterruptAsFork(FiberId.none);
+        this.currentAttemptFiber?.interruptUnsafe();
         this.currentAttemptId = null;
         this.currentAttemptFiber = null;
       }
@@ -548,6 +577,14 @@ export class SettingsSyncSupervisor {
         yield* Deferred.failCause(event.ack, cause);
       } else if (event._tag === "Shutdown") {
         yield* Deferred.failCause(event.ack, cause);
+      } else if (event._tag === "Flush") {
+        yield* Deferred.fail(
+          event.ack,
+          new SettingsSyncFlushFailed({
+            message: "Unable to finish settings sync",
+            cause: Cause.squash(cause),
+          }),
+        );
       }
 
       switch (event._tag) {
@@ -614,6 +651,10 @@ export class SettingsSyncSupervisor {
         return this.handleBeforeLogoutEvent(state, event).pipe(
           Effect.map((next) => ({ _tag: "Continue" as const, state: next })),
         );
+      case "Flush":
+        return this.handleFlush(state, event).pipe(
+          Effect.map((next) => ({ _tag: "Continue" as const, state: next })),
+        );
       case "AttemptFinished":
         return this.handleAttemptFinished(state, event).pipe(
           Effect.map((next) => ({ _tag: "Continue" as const, state: next })),
@@ -637,25 +678,18 @@ export class SettingsSyncSupervisor {
       return Deferred.succeed(event.ack, undefined).pipe(Effect.as(state));
     }
 
-    const transition = Effect.gen(this, function* () {
+    const transition = Effect.gen({ self: this }, function* () {
       const accountId =
         event.authState?.isAuthenticated && event.authState.userInfo?.sub
           ? event.authState.userInfo.sub
           : null;
       if (!accountId) {
-        yield* this.db(() => clearSyncState());
+        pauseSyncSession();
         this.notifyRenderers();
         return state;
       }
 
-      const canResume = yield* this.db(() =>
-        hasResumableUserSyncState(accountId),
-      );
-      const context = yield* this.activateAccount(
-        accountId,
-        canResume ? "resume" : "full",
-        event.epoch,
-      );
+      const context = yield* this.activateAccount(accountId, event.epoch);
       if (!context) return state;
       this.activeAccountId = accountId;
       this.wakeAdmissionOpen = true;
@@ -684,7 +718,7 @@ export class SettingsSyncSupervisor {
     if (this.stopping || event.epoch !== this.boundaryEpoch) {
       return Effect.succeed(state);
     }
-    const transition = Effect.gen(this, function* () {
+    const transition = Effect.gen({ self: this }, function* () {
       let next = yield* this.interruptAttempt(state);
       next = {
         ...next,
@@ -693,11 +727,7 @@ export class SettingsSyncSupervisor {
         rerunRequested: false,
         authorizationBlocked: false,
       };
-      const context = yield* this.activateAccount(
-        event.accountId,
-        "full",
-        event.epoch,
-      );
+      const context = yield* this.activateAccount(event.accountId, event.epoch);
       if (!context) return next;
       this.activeAccountId = event.accountId;
       this.wakeAdmissionOpen = true;
@@ -735,7 +765,7 @@ export class SettingsSyncSupervisor {
       return Effect.succeed(state);
     }
 
-    const transition = Effect.gen(this, function* () {
+    const transition = Effect.gen({ self: this }, function* () {
       const interrupted = yield* this.interruptAttempt(state);
       const organizationDeactivated = yield* this.withDb(
         Effect.sync(() => deactivateOrganizationSyncScopes()),
@@ -777,14 +807,114 @@ export class SettingsSyncSupervisor {
     );
   }
 
+  private handleFlush(
+    state: SupervisorState,
+    event: Extract<ControlEvent, { _tag: "Flush" }>,
+  ): Effect.Effect<SupervisorState> {
+    if (
+      !state.context ||
+      event.epoch !== state.epoch ||
+      !this.boundaryIsCurrent(event.epoch)
+    ) {
+      return Deferred.fail(
+        event.ack,
+        new SettingsSyncFlushFailed({
+          message: "Settings sync account changed",
+        }),
+      ).pipe(Effect.as(state));
+    }
+    const context = state.context;
+    const refreshMarker = {
+      attemptId: state.nextAttemptId,
+      epoch: event.epoch,
+      accountId: context.accountId,
+    };
+    return Effect.scoped(
+      Effect.gen({ self: this }, function* () {
+        const next = yield* this.interruptDebounce(state);
+        const transfer = Effect.gen({ self: this }, function* () {
+          // Let an in-flight push acknowledge its captured rows before flushing.
+          if (state.attempt) yield* Fiber.await(state.attempt.fiber);
+          if (!this.boundaryIsCurrent(event.epoch))
+            return yield* Effect.interrupt;
+          this.currentAttemptId = refreshMarker.attemptId;
+          this.guardedAuthenticationRefresh = refreshMarker;
+          this.localMutationDeadline = 0;
+          yield* this.db(resetNoteUploadDelays);
+          while (true) {
+            const result = yield* retryOnceAfterAuthenticationRequired(
+              () => this.runner.run(context),
+              () =>
+                this.refreshAuthenticationForAttempt(
+                  refreshMarker.attemptId,
+                  event.epoch,
+                  context.accountId,
+                ),
+            );
+            if (!this.boundaryIsCurrent(event.epoch))
+              return yield* Effect.interrupt;
+            // Conflict copies created during transfer also need to upload now.
+            const delayedNotes = yield* this.db(resetNoteUploadDelays);
+            if (!result.rebootstrap && !delayedNotes) break;
+          }
+        }).pipe(
+          Effect.ensuring(
+            state.attempt ? Fiber.interrupt(state.attempt.fiber) : Effect.void,
+          ),
+        );
+        const fiber = yield* Effect.forkScoped(
+          transfer.pipe(
+            Effect.timeoutOrElse({
+              duration: FLUSH_TIMEOUT_MS,
+              orElse: () =>
+                Effect.fail(
+                  new SettingsSyncFlushFailed({
+                    message: "Settings sync timed out",
+                  }),
+                ),
+            }),
+          ),
+        );
+        this.currentAttemptFiber = fiber;
+        const exit = yield* Fiber.await(fiber);
+        this.currentAttemptFiber = null;
+        this.currentAttemptId = null;
+        if (this.guardedAuthenticationRefresh === refreshMarker) {
+          this.guardedAuthenticationRefresh = null;
+        }
+        if (Exit.isSuccess(exit)) this.wakeAdmissionOpen = true;
+        yield* Deferred.done(
+          event.ack,
+          Exit.isSuccess(exit)
+            ? Exit.void
+            : Exit.fail(
+                new SettingsSyncFlushFailed({
+                  message: "Unable to finish settings sync",
+                  cause: Cause.squash(exit.cause),
+                }),
+              ),
+        );
+        return {
+          ...next,
+          attempt: null,
+          rerunRequested: false,
+          authorizationBlocked: Exit.isSuccess(exit)
+            ? false
+            : next.authorizationBlocked,
+          nextAttemptId: state.nextAttemptId + 1,
+        };
+      }),
+    );
+  }
+
   private handleBeforeLogoutEvent(
     state: SupervisorState,
     event: Extract<ControlEvent, { _tag: "BeforeLogout" }>,
   ): Effect.Effect<SupervisorState> {
-    const cleanup = Effect.gen(this, function* () {
+    const cleanup = Effect.gen({ self: this }, function* () {
       let next = yield* this.interruptAttempt(state);
       next = yield* this.interruptDebounce(next);
-      yield* this.db(() => clearSyncState());
+      yield* this.withDb(Effect.sync(pauseSyncSession));
       return {
         ...next,
         epoch: event.epoch,
@@ -820,7 +950,7 @@ export class SettingsSyncSupervisor {
     state: SupervisorState,
     event: Extract<ControlEvent, { _tag: "Shutdown" }>,
   ): Effect.Effect<void> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const next = yield* this.interruptAttempt(state);
       yield* this.interruptDebounce(next);
       pauseSyncSession();
@@ -876,7 +1006,7 @@ export class SettingsSyncSupervisor {
       ? Math.max(0, deadline - Date.now())
       : 0;
 
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const withoutPrevious = yield* this.interruptDebounce(state);
       const fiber = yield* Effect.forkIn(
         Effect.sleep(remainingDelay).pipe(
@@ -915,9 +1045,6 @@ export class SettingsSyncSupervisor {
       this.currentAttemptFiber = null;
     }
     const completed = { ...state, attempt: null };
-    if (Exit.isInterrupted(event.exit)) {
-      return Effect.succeed(completed);
-    }
     if (Exit.isSuccess(event.exit)) {
       const next = {
         ...completed,
@@ -932,8 +1059,22 @@ export class SettingsSyncSupervisor {
             }).pipe(Effect.flatMap(() => this.handleLocalMutation(next)))
           : Effect.succeed(next);
     }
+    if (Cause.hasDies(event.exit.cause)) {
+      logger.main.error("Settings sync attempt failed unexpectedly", {
+        error: Cause.squash(event.exit.cause),
+        defects: event.exit.cause.reasons
+          .filter(Cause.isDieReason)
+          .map((reason) => reason.defect),
+      });
+      return completed.rerunRequested && !Cause.hasInterrupts(event.exit.cause)
+        ? this.startAttempt({ ...completed, rerunRequested: false })
+        : Effect.succeed(completed);
+    }
+    if (Cause.hasInterrupts(event.exit.cause)) {
+      return Effect.succeed(completed);
+    }
 
-    const errorOption = Cause.failureOption(event.exit.cause);
+    const errorOption = Cause.findErrorOption(event.exit.cause);
     const error = Option.isSome(errorOption)
       ? errorOption.value
       : Cause.squash(event.exit.cause);
@@ -1004,12 +1145,12 @@ export class SettingsSyncSupervisor {
     const id = state.nextAttemptId;
     const epoch = state.epoch;
     const context = state.context;
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const startGate = yield* Deferred.make<void>();
       const fiber = yield* Effect.forkIn(
         Effect.exit(
           Deferred.await(startGate).pipe(
-            Effect.zipRight(
+            Effect.andThen(
               retryOnceAfterAuthenticationRequired(
                 () => this.runner.run(context),
                 () =>
@@ -1056,14 +1197,15 @@ export class SettingsSyncSupervisor {
       this.currentAttemptId === attemptId &&
       this.boundaryEpoch === epoch &&
       this.activeAccountId === accountId;
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       if (!isCurrent()) return yield* Effect.interrupt;
+      const previousMarker = this.guardedAuthenticationRefresh;
       this.guardedAuthenticationRefresh = marker;
       yield* this.authService.refreshTokenIfNeeded(true).pipe(
         Effect.ensuring(
           Effect.sync(() => {
             if (this.guardedAuthenticationRefresh === marker) {
-              this.guardedAuthenticationRefresh = null;
+              this.guardedAuthenticationRefresh = previousMarker;
             }
           }),
         ),
@@ -1107,43 +1249,19 @@ export class SettingsSyncSupervisor {
 
   private activateAccount(
     accountId: string,
-    mode: "full" | "resume",
     epoch: number,
   ): Effect.Effect<SyncContext | null, SettingsSyncLifecycleError> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       pauseSyncSession();
-      if (mode === "full") {
-        yield* this.db(() => clearSyncState());
-        this.notifyRenderers();
-      }
+      if (!this.boundaryIsCurrent(epoch)) return null;
+
+      const context = yield* this.db(() => beginUserSyncSession(accountId));
       if (!this.boundaryIsCurrent(epoch)) {
         pauseSyncSession();
         return null;
       }
 
-      const context = yield* this.db(() =>
-        mode === "full"
-          ? beginUserSyncSession(accountId)
-          : resumeUserSyncSession(accountId),
-      );
-      if (!this.boundaryIsCurrent(epoch)) {
-        pauseSyncSession();
-        return null;
-      }
-
-      const adopted = yield* this.withDb(
-        Effect.gen(this, function* () {
-          const prepared = yield* this.fromPromise(
-            () => prepareVisibleRowsForFullSync(context),
-            "database",
-          );
-          if (!prepared) return false;
-          return yield* this.fromPromise(
-            () => adoptVisibleRows(context),
-            "database",
-          );
-        }),
-      );
+      const adopted = yield* this.db(() => adoptVisibleRows(context));
       if (!adopted || !this.boundaryIsCurrent(epoch)) {
         if (!this.boundaryIsCurrent(epoch)) pauseSyncSession();
         return null;
@@ -1157,7 +1275,7 @@ export class SettingsSyncSupervisor {
     context: SyncContext,
   ): Effect.Effect<boolean, SettingsSyncLifecycleError> {
     return this.withDb(
-      Effect.gen(this, function* () {
+      Effect.gen({ self: this }, function* () {
         const hadActiveOrganization = deactivateOrganizationSyncScopes();
         const reconciled = yield* this.fromPromise(
           () =>
@@ -1180,7 +1298,7 @@ export class SettingsSyncSupervisor {
   }
 
   private pollLoop(): Effect.Effect<never> {
-    return Effect.async<never>(() => {
+    return Effect.callback<never>(() => {
       const timer = setInterval(() => this.wake(), POLL_INTERVAL_MS);
       timer.unref?.();
       return Effect.sync(() => clearInterval(timer));
@@ -1216,13 +1334,18 @@ export class SettingsSyncSupervisor {
     effect: Effect.Effect<T, E>,
   ): Effect.Effect<T, SettingsSyncLifecycleError> {
     return effect.pipe(
-      Effect.mapError(
-        (cause) =>
-          new SettingsSyncDependencyFailure({
-            message: "Settings sync authentication operation failed",
-            dependency: "authentication",
+      Effect.catchCause((cause) =>
+        Effect.failCause(
+          Cause.map(
             cause,
-          }),
+            (cause) =>
+              new SettingsSyncDependencyFailure({
+                message: "Settings sync authentication operation failed",
+                dependency: "authentication",
+                cause,
+              }),
+          ),
+        ),
       ),
     );
   }
@@ -1232,11 +1355,11 @@ export class SettingsSyncSupervisor {
   }
 
   private offer(event: ControlEvent): void {
-    Runtime.runSync(this.runtime, Queue.offer(this.events, event));
+    Queue.offerUnsafe(this.events, event);
   }
 
   private runBoundary<T, E>(effect: Effect.Effect<T, E>): Promise<T> {
-    return Runtime.runPromiseExit(this.runtime)(effect).then((exit) => {
+    return Effect.runPromiseExitWith(this.context)(effect).then((exit) => {
       if (Exit.isSuccess(exit)) return exit.value;
       throw Cause.squash(exit.cause);
     });

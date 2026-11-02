@@ -3,21 +3,22 @@ import {
   Effect,
   Exit,
   Fiber,
-  FiberId,
   Layer,
-  Runtime,
+  Option,
+  Context,
   Scope,
+  Semaphore,
 } from "effect";
 
 import {
-  activateActivityMaterializationAccount,
   captureActivityRows,
   materializeCompletedDictationActivities,
   removeActivityRows,
 } from "../db/activity-outbox";
+import { applyAccountSummary, getStatsRevision } from "../db/dictation-stats";
 import { transcriptionEvents } from "../db/transcription-events";
 import { logger } from "../main/logger";
-import { down, up } from "../main/runtime/layer-helpers";
+import { down, orDiePreservingCause, up } from "../main/runtime/layer-helpers";
 import {
   ActivityReportingServiceTag,
   AppScopeTag,
@@ -36,6 +37,7 @@ import {
 import type { AuthService, AuthState } from "./auth-service";
 import { retryOnceAfterAuthenticationRequired } from "./auth-retry";
 import { ActivityReportingClient } from "./activity-reporting-client";
+import { getAccountSummary } from "./account-summary";
 import {
   ActivityReportingContractFailure,
   ActivityReportingDependencyFailure,
@@ -75,12 +77,15 @@ export class ActivityReportingService {
   private initialized = false;
   private stopped = false;
   private currentAccountId: string | null = null;
-  private worker: Fiber.RuntimeFiber<void, never> | null = null;
+  private worker: Fiber.Fiber<void, never> | null = null;
   private currentWorkerId: number | null = null;
   private nextWorkerId = 1;
   private boundaryEpoch = 0;
   private rerunRequested = false;
   private authorizationBlocked = false;
+  private summaryRefreshRequested = false;
+  private summarySchedule: Fiber.Fiber<never, never> | null = null;
+  private readonly summaryViews = new Set<symbol>();
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private unregisterBeforeLogout: (() => void) | null = null;
 
@@ -90,7 +95,7 @@ export class ActivityReportingService {
       // Stage independently of HTTP so a slow upload cannot delay the snapshot.
       this.materializeUntilCaughtUp().pipe(
         Effect.tap(() => Effect.sync(() => this.wake())),
-        Effect.catchAll((error) =>
+        Effect.catch((error) =>
           Effect.sync(() => {
             logger.main.error(
               "Failed to materialize settled transcription activity",
@@ -108,21 +113,7 @@ export class ActivityReportingService {
   private readonly onAuthenticated = (authState: AuthState) => {
     const accountId = authState.userInfo?.sub;
     if (!accountId || !this.initialized || this.stopped) return;
-    const epoch = this.beginAccountBoundary();
-    this.forkScoped(
-      this.activateAccount(accountId, epoch).pipe(
-        Effect.catchAll((error) =>
-          Effect.sync(() => {
-            logger.main.error("Failed to activate activity reporting account", {
-              error,
-            });
-          }),
-        ),
-        this.logBackgroundDefect(
-          "Activity account activation failed unexpectedly",
-        ),
-      ),
-    );
+    this.activateAccount(accountId);
   };
 
   private readonly onTokenRefreshed = (authState: AuthState) => {
@@ -141,25 +132,31 @@ export class ActivityReportingService {
   private constructor(
     private readonly authService: AuthService,
     private readonly client: ActivityClient,
-    private readonly runtime: Runtime.Runtime<never>,
-    private serviceScope: Scope.CloseableScope,
-    private readonly dbSemaphore: Effect.Semaphore,
+    private readonly context: Context.Context<never>,
+    private serviceScope: Scope.Closeable,
+    private readonly dbSemaphore: Semaphore.Semaphore,
+    private readonly reportingSemaphore: Semaphore.Semaphore,
+    private readonly readSummary: typeof getAccountSummary,
   ) {}
 
   private static make(
     authService: AuthService,
     client?: ActivityClient,
-    runtime: Runtime.Runtime<never> = Runtime.defaultRuntime,
+    context: Context.Context<never> = Context.empty(),
+    readSummary: typeof getAccountSummary = getAccountSummary,
   ): Effect.Effect<ActivityReportingService> {
     return Effect.gen(function* () {
       const serviceScope = yield* Scope.make();
-      const dbSemaphore = yield* Effect.makeSemaphore(1);
+      const dbSemaphore = yield* Semaphore.make(1);
+      const reportingSemaphore = yield* Semaphore.make(1);
       return new ActivityReportingService(
         authService,
         client ?? new ActivityReportingClient(authService),
-        runtime,
+        context,
         serviceScope,
         dbSemaphore,
+        reportingSemaphore,
+        readSummary,
       );
     });
   }
@@ -173,22 +170,24 @@ export class ActivityReportingService {
     Effect.gen(function* () {
       const authService = yield* AuthServiceTag;
       const appScope = yield* AppScopeTag;
-      const runtime = yield* Effect.runtime<never>();
+      const context = yield* Effect.context<never>();
       const service = yield* ActivityReportingService.make(
         authService,
         undefined,
-        runtime,
+        context,
       );
       yield* Scope.addFinalizer(
         appScope,
         Effect.sync(() =>
           logger.main.info("Shutting down activity reporting service..."),
         ).pipe(
-          Effect.zipRight(service.shutdown()),
-          Effect.zipLeft(down("activityReportingService")),
+          Effect.andThen(service.shutdown()),
+          Effect.tap(down("activityReportingService")),
         ),
       );
-      yield* Effect.uninterruptible(service.initialize().pipe(Effect.orDie));
+      yield* Effect.uninterruptible(
+        service.initialize().pipe(orDiePreservingCause),
+      );
       logger.main.info("Activity reporting service created");
       up("activityReportingService");
       return service;
@@ -198,12 +197,20 @@ export class ActivityReportingService {
   static createForTests(
     authService: AuthService,
     client?: ActivityClient,
+    readSummary?: typeof getAccountSummary,
   ): ActivityReportingService {
-    return Effect.runSync(ActivityReportingService.make(authService, client));
+    return Effect.runSync(
+      ActivityReportingService.make(
+        authService,
+        client,
+        undefined,
+        readSummary,
+      ),
+    );
   }
 
   initialize(): Effect.Effect<void, ActivityReportingDependencyFailure> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       if (this.initialized) return;
       if (this.stopped) {
         this.serviceScope = yield* Scope.make();
@@ -229,8 +236,8 @@ export class ActivityReportingService {
       );
       if (this.stopped || !this.initialized) return;
       if (authState?.isAuthenticated && authState.userInfo?.sub) {
-        const epoch = this.beginAccountBoundary();
-        return yield* this.activateAccount(authState.userInfo.sub, epoch);
+        this.activateAccount(authState.userInfo.sub);
+        return;
       }
       this.currentAccountId = null;
       this.wake();
@@ -248,12 +255,80 @@ export class ActivityReportingService {
     const work = this.runWorker().pipe(
       Effect.onExit(() => Effect.sync(() => this.finishWorker(workerId))),
     );
-    const fiber = Runtime.runFork(this.runtime)(work, {
-      scope: this.serviceScope,
-    });
+    const fiber = this.forkScoped(work);
     if (this.currentWorkerId === workerId) {
       this.worker = fiber;
     }
+  }
+
+  requestSummaryRefresh(): void {
+    if (this.stopped || !this.initialized) return;
+    this.summaryRefreshRequested = true;
+    this.wake();
+  }
+
+  flush(): Effect.Effect<void, ActivityReportingClientError> {
+    return this.reportingSemaphore.withPermits(1)(
+      Effect.gen({ self: this }, function* () {
+        const accountId = this.currentAccountId;
+        const epoch = this.boundaryEpoch;
+        if (!accountId || this.stopped) {
+          return yield* Effect.fail(
+            new AuthenticationRequired({ message: "Sign in required" }),
+          );
+        }
+        yield* this.materializeUntilCaughtUp();
+        const drained = yield* retryOnceAfterAuthenticationRequired(
+          () => this.reportUntilDrained(epoch, accountId),
+          () => this.refreshAuthenticationIfCurrent(epoch, accountId),
+        );
+        if (!drained) {
+          return yield* Effect.fail(
+            new AuthenticationRequired({
+              message: "Account changed while flushing dictation activity",
+            }),
+          );
+        }
+      }),
+    );
+  }
+
+  // Subscription lifetime owns the fast cadence, including renderer disconnects.
+  watchSummary(): () => void {
+    const alreadyVisible = this.summaryViews.size > 0;
+    const view = Symbol();
+    this.summaryViews.add(view);
+    if (!alreadyVisible) {
+      this.restartSummarySchedule();
+    }
+    return () => {
+      if (!this.summaryViews.delete(view)) return;
+      if (this.summaryViews.size === 0) {
+        this.restartSummarySchedule();
+      }
+    };
+  }
+
+  private restartSummarySchedule(): void {
+    this.summarySchedule?.interruptUnsafe();
+    this.summarySchedule = null;
+    if (this.stopped || !this.initialized || !this.currentAccountId) return;
+    const visible = this.summaryViews.size > 0;
+    this.summarySchedule = this.forkScoped(
+      Effect.forever(
+        Effect.suspend(() =>
+          Effect.sleep(
+            visible
+              ? (301 + Math.floor(Math.random() * 60)) * 1000
+              : 60 * 60_000,
+          ).pipe(
+            Effect.andThen(Effect.sync(() => this.requestSummaryRefresh())),
+          ),
+        ),
+        // Sleep already yields; schedule the next interval in this turn.
+        { disableYield: true },
+      ),
+    );
   }
 
   shutdown(): Effect.Effect<void> {
@@ -266,6 +341,9 @@ export class ActivityReportingService {
         this.currentAccountId = null;
         this.authorizationBlocked = false;
         this.rerunRequested = false;
+        this.summaryRefreshRequested = false;
+        this.summarySchedule = null;
+        this.summaryViews.clear();
 
         if (this.pollTimer) clearInterval(this.pollTimer);
         this.pollTimer = null;
@@ -296,42 +374,21 @@ export class ActivityReportingService {
     this.currentAccountId = null;
     this.authorizationBlocked = false;
     this.rerunRequested = false;
-    return worker ? Fiber.interrupt(worker).pipe(Effect.asVoid) : Effect.void;
+    this.summaryRefreshRequested = false;
+    this.restartSummarySchedule();
+    return (worker ? Fiber.interrupt(worker) : Effect.void).pipe(
+      Effect.andThen(this.withDb(Effect.void)),
+    );
   }
 
-  private beginAccountBoundary(): number {
+  private activateAccount(accountId: string): void {
     this.boundaryEpoch += 1;
-    this.currentAccountId = null;
+    this.currentAccountId = accountId;
     this.authorizationBlocked = false;
     this.rerunRequested = false;
-    this.worker?.unsafeInterruptAsFork(FiberId.none);
-    return this.boundaryEpoch;
-  }
-
-  private activateAccount(
-    accountId: string,
-    epoch: number,
-  ): Effect.Effect<void, ActivityReportingDependencyFailure> {
-    return this.withDb(
-      Effect.suspend(() => {
-        if (!this.boundaryIsCurrent(epoch)) return Effect.succeed(false);
-        return this.database(() =>
-          activateActivityMaterializationAccount(accountId),
-        ).pipe(
-          Effect.map(() => {
-            if (!this.boundaryIsCurrent(epoch)) return false;
-            this.currentAccountId = accountId;
-            this.authorizationBlocked = false;
-            return true;
-          }),
-        );
-      }),
-    ).pipe(
-      Effect.tap((activated) =>
-        activated ? Effect.sync(() => this.wake()) : Effect.void,
-      ),
-      Effect.asVoid,
-    );
+    this.restartSummarySchedule();
+    this.worker?.interruptUnsafe();
+    this.wake();
   }
 
   private runWorker(): Effect.Effect<void, never> {
@@ -339,21 +396,51 @@ export class ActivityReportingService {
       Effect.suspend(() => {
         const iterationEpoch = this.boundaryEpoch;
         let uploadAccountId: string | null = null;
+        const refreshRequested =
+          this.summaryRefreshRequested && this.currentAccountId !== null;
+        if (refreshRequested) this.summaryRefreshRequested = false;
         this.rerunRequested = false;
-        return this.materializeUntilCaughtUp().pipe(
-          Effect.flatMap(() => {
-            const accountId = this.currentAccountId;
-            const epoch = this.boundaryEpoch;
-            if (!accountId || this.authorizationBlocked) return Effect.void;
-            uploadAccountId = accountId;
-            return retryOnceAfterAuthenticationRequired(
-              () => this.reportUntilDrained(epoch, accountId),
-              () => this.refreshAuthenticationIfCurrent(epoch, accountId),
+        return Effect.gen({ self: this }, function* () {
+          const revision = refreshRequested
+            ? yield* this.db(async () => getStatsRevision())
+            : null;
+          const drainedAccount = yield* this.reportingSemaphore.withPermits(1)(
+            Effect.gen({ self: this }, function* () {
+              yield* this.materializeUntilCaughtUp();
+              const accountId = this.currentAccountId;
+              const epoch = this.boundaryEpoch;
+              if (!accountId || this.authorizationBlocked) return null;
+              uploadAccountId = accountId;
+              const drained = yield* retryOnceAfterAuthenticationRequired(
+                () => this.reportUntilDrained(epoch, accountId),
+                () => this.refreshAuthenticationIfCurrent(epoch, accountId),
+              );
+              return drained ? { epoch, accountId } : null;
+            }),
+          );
+          if (drainedAccount && revision !== null) {
+            yield* this.refreshSummary(
+              drainedAccount.epoch,
+              drainedAccount.accountId,
+              revision,
             );
-          }),
-          Effect.matchEffect({
-            onFailure: (error) =>
-              this.handleAttemptFailure(error, iterationEpoch, uploadAccountId),
+          }
+        }).pipe(
+          Effect.matchCauseEffect({
+            onFailure: (cause) => {
+              const failure = Cause.findErrorOption(cause);
+              if (
+                cause.reasons.every(Cause.isFailReason) &&
+                Option.isSome(failure)
+              ) {
+                return this.handleAttemptFailure(
+                  failure.value,
+                  iterationEpoch,
+                  uploadAccountId,
+                );
+              }
+              return Effect.failCause(cause);
+            },
             onSuccess: () =>
               iterationEpoch === this.boundaryEpoch &&
               this.rerunRequested &&
@@ -361,16 +448,25 @@ export class ActivityReportingService {
                 ? iteration()
                 : Effect.void,
           }),
-          Effect.catchAllCause((cause) => {
-            if (Cause.isInterruptedOnly(cause)) {
-              return Effect.failCause(cause);
+          Effect.catchCause((cause) => {
+            if (Cause.hasInterruptsOnly(cause)) {
+              // Rebuild from interrupts to narrow the typed error channel to never.
+              return Effect.failCause(
+                Cause.fromReasons(
+                  cause.reasons.filter(Cause.isInterruptReason),
+                ),
+              );
             }
             if (iterationEpoch === this.boundaryEpoch) {
-              this.rerunRequested = false;
+              this.rerunRequested =
+                this.summaryRefreshRequested && this.currentAccountId !== null;
             }
             return Effect.sync(() => {
               logger.main.error("Activity reporting worker failed", {
                 error: Cause.squash(cause),
+                defects: cause.reasons
+                  .filter(Cause.isDieReason)
+                  .map((reason) => reason.defect),
               });
             });
           }),
@@ -386,7 +482,8 @@ export class ActivityReportingService {
     accountId: string | null,
   ): Effect.Effect<void> {
     if (epoch !== this.boundaryEpoch || this.stopped) return Effect.void;
-    this.rerunRequested = false;
+    this.rerunRequested =
+      this.summaryRefreshRequested && this.currentAccountId !== null;
     if (error instanceof AuthenticationRequired) {
       if (!accountId || accountId !== this.currentAccountId) {
         return Effect.void;
@@ -419,6 +516,41 @@ export class ActivityReportingService {
     });
   }
 
+  private refreshSummary(
+    epoch: number,
+    accountId: string,
+    expectedRevision: number,
+  ): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      const current = yield* this.db(
+        async () =>
+          this.uploadBoundaryIsCurrent(epoch, accountId) &&
+          getStatsRevision() === expectedRevision,
+      );
+      if (!current) return;
+      const summary = yield* Effect.tryPromise({
+        try: (signal) => this.readSummary(this.authService, accountId, signal),
+        catch: (cause) => cause,
+      });
+      yield* this.db(async () => {
+        if (this.uploadBoundaryIsCurrent(epoch, accountId)) {
+          applyAccountSummary(accountId, expectedRevision, summary.totals);
+        }
+      });
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.sync(() => {
+          logger.main.warn(
+            "Account dictation stats refresh failed; cache retained",
+            {
+              error,
+            },
+          );
+        }),
+      ),
+    );
+  }
+
   private refreshAuthenticationIfCurrent(
     epoch: number,
     accountId: string,
@@ -430,10 +562,10 @@ export class ActivityReportingService {
     );
 
     return ensureCurrent.pipe(
-      Effect.zipRight(
+      Effect.andThen(
         this.authentication(this.authService.refreshTokenIfNeeded(true)),
       ),
-      Effect.zipRight(ensureCurrent),
+      Effect.andThen(ensureCurrent),
     );
   }
 
@@ -441,13 +573,16 @@ export class ActivityReportingService {
     void,
     ActivityReportingDependencyFailure
   > {
+    const epoch = this.boundaryEpoch;
     const scan = (): Effect.Effect<void, ActivityReportingDependencyFailure> =>
-      this.db(() =>
-        materializeCompletedDictationActivities(ACTIVITY_MAX_BATCH_SIZE),
+      this.db(async () =>
+        this.boundaryIsCurrent(epoch)
+          ? materializeCompletedDictationActivities(ACTIVITY_MAX_BATCH_SIZE)
+          : { scanned: 0, enqueued: 0 },
       ).pipe(
         Effect.flatMap((result) =>
           result.scanned === ACTIVITY_MAX_BATCH_SIZE
-            ? Effect.yieldNow().pipe(Effect.zipRight(Effect.suspend(scan)))
+            ? Effect.yieldNow.pipe(Effect.andThen(Effect.suspend(scan)))
             : Effect.void,
         ),
       );
@@ -458,11 +593,16 @@ export class ActivityReportingService {
   private reportUntilDrained(
     epoch: number,
     accountId: string,
-  ): Effect.Effect<void, ActivityAttemptError> {
-    const drain = (): Effect.Effect<void, ActivityAttemptError> =>
+  ): Effect.Effect<boolean, ActivityAttemptError> {
+    const drain = (): Effect.Effect<boolean, ActivityAttemptError> =>
       this.findNextRows().pipe(
         Effect.flatMap((rows) => {
-          if (rows.length === 0) return Effect.void;
+          if (!this.uploadBoundaryIsCurrent(epoch, accountId)) {
+            return Effect.succeed(false);
+          }
+          if (rows.length === 0) {
+            return Effect.succeed(true);
+          }
           return Effect.try({
             try: () => buildActivityBatch(rows.map((row) => row.payload)),
             catch: (cause) =>
@@ -489,7 +629,7 @@ export class ActivityReportingService {
                       accountId,
                     ).pipe(
                       Effect.flatMap((removed) =>
-                        removed ? Effect.suspend(drain) : Effect.void,
+                        removed ? Effect.suspend(drain) : Effect.succeed(false),
                       ),
                     ),
                   ),
@@ -525,8 +665,8 @@ export class ActivityReportingService {
                   ) {
                     return Effect.succeed(nextRows);
                   }
-                  return Effect.yieldNow().pipe(
-                    Effect.zipRight(Effect.suspend(find)),
+                  return Effect.yieldNow.pipe(
+                    Effect.andThen(Effect.suspend(find)),
                   );
                 }),
               ),
@@ -583,13 +723,18 @@ export class ActivityReportingService {
     effect: Effect.Effect<T, E>,
   ): Effect.Effect<T, ActivityReportingDependencyFailure> {
     return effect.pipe(
-      Effect.mapError(
-        (cause) =>
-          new ActivityReportingDependencyFailure({
-            message: "Activity reporting authentication operation failed",
-            dependency: "authentication",
+      Effect.catchCause((cause) =>
+        Effect.failCause(
+          Cause.map(
             cause,
-          }),
+            (cause) =>
+              new ActivityReportingDependencyFailure({
+                message: "Activity reporting authentication operation failed",
+                dependency: "authentication",
+                cause,
+              }),
+          ),
+        ),
       ),
     );
   }
@@ -615,18 +760,23 @@ export class ActivityReportingService {
     }
   }
 
-  private forkScoped(effect: Effect.Effect<void, never>): void {
-    Runtime.runFork(this.runtime)(effect, { scope: this.serviceScope });
+  private forkScoped<A>(effect: Effect.Effect<A>): Fiber.Fiber<A> {
+    return Effect.runForkWith(this.context)(
+      Effect.withFiber((fiber) => {
+        Fiber.runIn(fiber, this.serviceScope);
+        return effect;
+      }),
+    );
   }
 
   private logBackgroundDefect(message: string) {
     return <A, E>(effect: Effect.Effect<A, E>): Effect.Effect<A, E> =>
       effect.pipe(
-        Effect.catchAllCause((cause) => {
-          if (Cause.isInterruptedOnly(cause)) return Effect.failCause(cause);
+        Effect.catchCause((cause) => {
+          if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause);
           return Effect.sync(() => {
             logger.main.error(message, { error: Cause.squash(cause) });
-          }).pipe(Effect.zipRight(Effect.failCause(cause)));
+          }).pipe(Effect.andThen(Effect.failCause(cause)));
         }),
       );
   }

@@ -11,6 +11,7 @@ import {
 import {
   AMICAL_DEVICE_ID_HEADER,
   getAmicalClientHeaders,
+  getAmicalClientInfo,
   getCoreApiUrl,
   getUserAgent,
 } from "../utils/http-client";
@@ -20,8 +21,7 @@ import type {
   ContractFailureKind,
   TelemetryService,
 } from "./telemetry-service";
-import { getApplicationLocale } from "../i18n/application-locale";
-import { Data, Effect, Layer, Scope } from "effect";
+import { Cause, Data, Effect, Layer, Scope } from "effect";
 import { z } from "zod";
 import {
   RemoteConfigServiceTag,
@@ -31,9 +31,14 @@ import {
   AppScopeTag,
 } from "../main/runtime/tags";
 import { addRelease, step, up } from "../main/runtime/layer-helpers";
+import {
+  DESKTOP_REFRESH_AUDIO_DEVICES_ON_START_FLAG,
+  DESKTOP_STEREO_MIC_DOWNMIX_FLAG,
+} from "@/types/audio-capture";
 
 const REFRESH_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 export const DESKTOP_BACKGROUND_UPDATES_FLAG = "desktop-background-updates";
+export const DESKTOP_AUTO_VOCABULARY_FLAG = "desktop-auto-vocabulary";
 
 /**
  * Network-phase failure: server unreachable or a non-OK status.
@@ -135,13 +140,22 @@ const parseEnvelope = (
 
 export type DesktopRemoteConfig = Omit<RemoteConfig, "flags"> & {
   flags: NonNullable<RemoteConfig["flags"]> &
-    Record<typeof DESKTOP_BACKGROUND_UPDATES_FLAG, boolean>;
+    Record<
+      | typeof DESKTOP_BACKGROUND_UPDATES_FLAG
+      | typeof DESKTOP_AUTO_VOCABULARY_FLAG
+      | typeof DESKTOP_STEREO_MIC_DOWNMIX_FLAG
+      | typeof DESKTOP_REFRESH_AUDIO_DEVICES_ON_START_FLAG,
+      boolean
+    >;
 };
 
 const resolveRemoteConfig = (config: RemoteConfig): DesktopRemoteConfig => ({
   ...config,
   flags: {
     [DESKTOP_BACKGROUND_UPDATES_FLAG]: true,
+    [DESKTOP_AUTO_VOCABULARY_FLAG]: true,
+    [DESKTOP_STEREO_MIC_DOWNMIX_FLAG]: true,
+    [DESKTOP_REFRESH_AUDIO_DEVICES_ON_START_FLAG]: false,
     ...(config.flags ?? {}),
   },
 });
@@ -329,36 +343,51 @@ export class RemoteConfigService {
   private doRefresh(): Promise<void> {
     return Effect.runPromise(
       this.refreshEffect().pipe(
-        Effect.catchTags({
-          RemoteConfigFetchFailed: (error) =>
-            Effect.sync(() => {
-              if (error.status !== undefined && error.cause === undefined) {
-                logger.main.warn("Remote config fetch failed", {
-                  status: error.status,
-                });
-              } else {
+        Effect.catchCause((cause) => {
+          if (Cause.hasInterrupts(cause)) return Effect.failCause(cause);
+          return Effect.sync(() => {
+            for (const reason of cause.reasons) {
+              if (Cause.isDieReason(reason)) {
                 logger.main.error(
                   "Failed to refresh remote config:",
-                  error.cause ?? error,
+                  reason.defect,
                 );
+              } else if (Cause.isFailReason(reason)) {
+                const error = reason.error;
+                switch (error._tag) {
+                  case "RemoteConfigFetchFailed":
+                    if (
+                      error.status !== undefined &&
+                      error.cause === undefined
+                    ) {
+                      logger.main.warn("Remote config fetch failed", {
+                        status: error.status,
+                      });
+                    } else {
+                      logger.main.error(
+                        "Failed to refresh remote config:",
+                        error.cause ?? error,
+                      );
+                    }
+                    break;
+                  case "RemoteConfigInvalid":
+                    this.reportInvalid(error);
+                    break;
+                  case "RemoteConfigStorageFailed":
+                    logger.main.error(
+                      "Failed to refresh remote config:",
+                      error.cause,
+                    );
+                    break;
+                }
               }
-            }),
-          RemoteConfigInvalid: (error) =>
-            Effect.sync(() => {
-              this.reportInvalid(error);
-            }),
-          RemoteConfigStorageFailed: (error) =>
-            Effect.sync(() => {
-              logger.main.error(
-                "Failed to refresh remote config:",
-                error.cause,
-              );
-            }),
+            }
+          });
         }),
-        Effect.catchAllDefect((defect) =>
-          Effect.sync(() => {
-            logger.main.error("Failed to refresh remote config:", defect);
-          }),
+        Effect.catchDefect((defect) =>
+          Effect.sync(() =>
+            logger.main.error("Failed to refresh remote config:", defect),
+          ),
         ),
       ),
     );
@@ -368,23 +397,29 @@ export class RemoteConfigService {
     unknown,
     RemoteConfigFetchFailed | RemoteConfigInvalid
   > {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const url = getCoreApiUrl("/apps/v1/remote-config");
-      url.searchParams.set("platform", process.platform);
-      url.searchParams.set("version", app.getVersion());
-      url.searchParams.set("locale", getApplicationLocale());
+      const { platform, version, locale } = getAmicalClientInfo();
+      url.searchParams.set("platform", platform);
+      url.searchParams.set("version", version);
+      url.searchParams.set("locale", locale);
 
       // Runs in all cases — the server decides what (if anything) to return per
       // auth state. Attach the bearer token only when signed in, plus the
       // anonymous per-install device id (for staged-rollout bucketing), the same
       // id the auto-updater sends.
       const idToken = yield* this.authService.getIdToken().pipe(
-        Effect.mapError(
-          (cause) =>
-            new RemoteConfigFetchFailed({
-              message: "Failed to resolve auth token for remote config",
+        Effect.catchCause((cause) =>
+          Effect.failCause(
+            Cause.map(
               cause,
-            }),
+              (error) =>
+                new RemoteConfigFetchFailed({
+                  message: "Failed to resolve auth token for remote config",
+                  cause: error,
+                }),
+            ),
+          ),
         ),
       );
       const deviceId = this.telemetryService.getMachineId();
@@ -444,7 +479,7 @@ export class RemoteConfigService {
     void,
     RemoteConfigFetchFailed | RemoteConfigInvalid | RemoteConfigStorageFailed
   > {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const generation = this.generation;
       const payload = yield* this.fetchEnvelopeEffect();
       const { config, brokenSurfaceIssues } = yield* parseEnvelope(payload);
@@ -527,7 +562,7 @@ export class RemoteConfigService {
 
   /** A cache that fails to load or validate is treated as absent. */
   private loadPersistedEffect(): Effect.Effect<void> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const persisted = yield* Effect.tryPromise({
         try: () => this.settingsService.getRemoteConfig(),
         catch: (cause) =>
@@ -559,7 +594,7 @@ export class RemoteConfigService {
             );
           }),
       }),
-      Effect.catchAllDefect((defect) =>
+      Effect.catchDefect((defect) =>
         Effect.sync(() => {
           logger.main.error("Failed to load persisted remote config:", defect);
         }),

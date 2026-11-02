@@ -87,10 +87,6 @@ vi.mock("../../src/db/transcriptions", () => ({
   updateTranscription: vi.fn(async () => undefined),
 }));
 
-vi.mock("../../src/db/daily-stats", () => ({
-  incrementDailyStats: vi.fn(async () => undefined),
-}));
-
 vi.mock("../../src/services/transcription/load-dictation-context", () => ({
   loadDictationContext: vi.fn(),
 }));
@@ -457,6 +453,9 @@ describe("TranscriptionService — conversion pins", () => {
     });
     await expect(chunkB).resolves.toBe("");
 
+    expect(
+      providerMocks.local.sessions.get("fail-session")!.transcribe,
+    ).toHaveBeenCalledTimes(1);
     // The lock survived: a fresh session transcribes normally.
     expect(service.beginStreamingSession("next-session")).toBe(true);
     await expect(processChunk("next-session", 3)).resolves.toContain("");

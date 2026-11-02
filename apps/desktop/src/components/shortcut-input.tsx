@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
+import { Kbd, KbdGroup } from "@/components/ui/kbd";
 import { Pencil, Trash2, X } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { api } from "@/trpc/react";
 import { toast } from "sonner";
 import {
-  getKeyFromKeycode,
   keycodeToDisplay,
+  sortKeycodesForDisplay,
   getKeycodeFromKeyName,
 } from "@/utils/keycode-map";
 import {
@@ -14,6 +15,7 @@ import {
   initialShortcutRecordingState,
 } from "@/utils/shortcut-recording";
 import { useTranslation } from "react-i18next";
+import type { I18nMessage } from "@/utils/shortcut-validation";
 
 interface ShortcutInputProps {
   value?: number[];
@@ -23,34 +25,12 @@ interface ShortcutInputProps {
   allowUnassign: boolean;
 }
 
-const MODIFIER_KEYS = new Set([
-  "Cmd",
-  "RCmd",
-  "Win",
-  "RWin",
-  "Ctrl",
-  "RCtrl",
-  "Alt",
-  "RAlt",
-  "Shift",
-  "RShift",
-  "Fn",
-]);
 const MAX_KEY_COMBINATION_LENGTH = 4;
 
 type ValidationResult = {
   valid: boolean;
-  shortcut?: number[];
-  error?: {
-    key: string;
-    params?: Record<string, string | number>;
-  };
+  error?: I18nMessage;
 };
-
-function isModifierKeycode(keycode: number): boolean {
-  const name = getKeyFromKeycode(keycode);
-  return name ? MODIFIER_KEYS.has(name) : false;
-}
 
 function mapDomCodeToAmicalKey(code: string): string | undefined {
   if (code.startsWith("Key")) return code.slice(3);
@@ -151,14 +131,7 @@ function validateShortcutFormat(keys: number[]): ValidationResult {
     };
   }
 
-  const modifierKeys = keys.filter((keycode) => isModifierKeycode(keycode));
-  const regularKeys = keys.filter((keycode) => !isModifierKeycode(keycode));
-
-  // Return array format: modifiers first, then regular keys
-  return {
-    valid: true,
-    shortcut: [...modifierKeys, ...regularKeys],
-  };
+  return { valid: true };
 }
 
 function RecordingDisplay({
@@ -178,16 +151,11 @@ function RecordingDisplay({
       tabIndex={0}
     >
       {activeKeys.length > 0 ? (
-        <div className="flex items-center gap-1">
-          {activeKeys.map((key, index) => (
-            <kbd
-              key={index}
-              className="px-1.5 py-0.5 text-xs bg-background rounded border"
-            >
-              {keycodeToDisplay(key)}
-            </kbd>
+        <KbdGroup>
+          {sortKeycodesForDisplay(activeKeys).map((key, index) => (
+            <Kbd key={index}>{keycodeToDisplay(key)}</Kbd>
           ))}
-        </div>
+        </KbdGroup>
       ) : (
         <span className="text-sm text-muted-foreground">{pressKeysText}</span>
       )}
@@ -221,19 +189,16 @@ function ShortcutDisplay({
   return (
     <>
       {hasShortcut ? (
-        <div
-          onClick={onEdit}
-          className="flex cursor-pointer items-center gap-1"
-        >
-          {value.map((key, index) => (
-            <kbd
+        <KbdGroup onClick={onEdit} className="group cursor-pointer">
+          {sortKeycodesForDisplay(value).map((key, index) => (
+            <Kbd
               key={index}
-              className="inline-flex items-center rounded-md border bg-muted px-2 py-0.5 font-mono text-sm transition-colors hover:bg-muted/70"
+              className="transition-colors group-hover:bg-muted/70"
             >
               {keycodeToDisplay(key)}
-            </kbd>
+            </Kbd>
           ))}
-        </div>
+        </KbdGroup>
       ) : (
         <span className="text-sm text-muted-foreground">{unassignedText}</span>
       )}
@@ -287,9 +252,9 @@ export function ShortcutInput({
   const processCompletedKeys = (completedKeys: number[]) => {
     const result = validateShortcutFormat(completedKeys);
 
-    if (result.valid && result.shortcut) {
+    if (result.valid) {
       // Basic format is valid - let parent handle backend validation
-      onChange(result.shortcut);
+      onChange(completedKeys);
     } else {
       toast.error(
         result.error

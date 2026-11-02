@@ -329,7 +329,9 @@
         "settings": "Settings",
         "aiModels": "AI Models",
         "configureMicrophone": "Configure Microphone",
-        "upgradePlan": "Upgrade plan"
+        "upgradePlan": "Upgrade plan",
+        "undo": "Undo",
+        "view": "View"
       },
       "type": {
         "noAudio": {
@@ -347,6 +349,9 @@
         "recordingAutoStopped": {
           "title": "Dictation auto-stopped",
           "description": "Max dictation duration reached. Start a new dictation if needed."
+        },
+        "vocabularyLearned": {
+          "title": "Added {{terms}} to your vocabulary"
         }
       },
       "errorCode": {
@@ -513,6 +518,7 @@
           "de": "Deutsch",
           "es": "Español",
           "ja": "日本語",
+          "ko": "한국어",
           "zh-TW": "繁體中文"
         },
         "restartDialog": {
@@ -558,6 +564,10 @@
       "preserveClipboard": {
         "label": "Preserve clipboard contents",
         "description": "After pasting a transcript, restore whatever was previously on your clipboard."
+      },
+      "widgetOutline": {
+        "label": "Show pill outline",
+        "description": "Show a pink outline and tint around the floating widget to inspect its bounds."
       },
       "debugMode": {
         "label": "Debug Mode",
@@ -759,7 +769,8 @@
         },
         "languagesLabel": "Languages",
         "languagesPlaceholder": "Select languages...",
-        "noResults": "No languages found."
+        "noResults": "No languages found.",
+        "cloudOnlyHint": "Cloud only. Local models use the base language."
       },
       "microphone": {
         "label": "Microphone",
@@ -857,7 +868,7 @@
         "invalidKeyCombination": "Invalid key combination",
         "alreadyAssigned": "Shortcut already assigned",
         "conflictsWithSystem": "{{shortcut}} conflicts with a system shortcut",
-        "addModifier": "Add a modifier key like Cmd, Ctrl, or Fn",
+        "addModifier": "Add a modifier key like {{mod1}}, {{mod2}}, or {{mod3}}",
         "duplicateModifierPairs": "Can't use both left and right {{modifier}} together",
         "overlapsWithPushToTalk": "This overlaps with your Push-to-talk shortcut and may cause issues",
         "linuxPortalTriggerRequired": "Wayland shortcuts need exactly one non-modifier trigger key, such as Space or a letter",
@@ -874,6 +885,7 @@
     },
     "notes": {
       "create": "Create note",
+      "loading": "Loading note...",
       "defaultTitleWithDate": "Note - {{date}}",
       "untitledTitle": "Untitled Note",
       "empty": {
@@ -930,9 +942,6 @@
         "error": "Changes could not be saved. Keep this window open and try editing again."
       },
       "cloud": {
-        "enrollment": "Add {{count}} notes from this device to your signed-in account? They will sync across your devices.",
-        "enroll": "Sync these notes",
-        "keepLocal": "Keep on this device",
         "error": "Saved on this device. Cloud sync needs attention: {{reason}}"
       }
     },
@@ -979,6 +988,10 @@
         "cancel": "Cancel",
         "deleting": "Deleting...",
         "confirm": "Delete"
+      },
+      "learned": {
+        "badge": "Learned",
+        "tooltip": "Added from your correction. Heard as “{{heard}}”."
       }
     },
     "snippets": {

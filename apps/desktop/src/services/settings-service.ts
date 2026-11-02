@@ -23,6 +23,7 @@ import {
 import { DEFAULT_HISTORY_RETENTION_PERIOD } from "../constants/history-retention";
 import { isWindows } from "../utils/platform";
 import { logger } from "../main/logger";
+import { SILENT_START_ARG } from "../main/launch-options";
 import type {
   ShortcutBindings,
   ShortcutsConfig,
@@ -68,7 +69,7 @@ function syncWindowsSquirrelAutoLaunch(openAtLogin: boolean): void {
       "Squirrel Update.exe not found; falling back to Electron login item settings",
       { updateExe },
     );
-    app.setLoginItemSettings({ openAtLogin });
+    app.setLoginItemSettings({ openAtLogin, args: [SILENT_START_ARG] });
     return;
   }
 
@@ -82,6 +83,9 @@ function syncWindowsSquirrelAutoLaunch(openAtLogin: boolean): void {
     `${openAtLogin ? "--createShortcut" : "--removeShortcut"}=${target}`,
     "--shortcut-locations=Startup",
   ];
+  if (openAtLogin) {
+    args.push(`--process-start-args=${SILENT_START_ARG}`);
+  }
 
   void runSquirrelShortcutCommand(updateExe, args)
     .then(() => {
@@ -110,6 +114,7 @@ export interface AppPreferences {
   muteDictationSounds: boolean;
   autoDictateOnNewNote: boolean;
   preserveClipboard: boolean;
+  showWidgetOutline: boolean;
   allowInjectedKeys: boolean;
 }
 
@@ -497,6 +502,7 @@ export class SettingsService extends EventEmitter {
       muteDictationSounds: preferences?.muteDictationSounds ?? false,
       autoDictateOnNewNote: preferences?.autoDictateOnNewNote ?? false,
       preserveClipboard: preferences?.preserveClipboard ?? true,
+      showWidgetOutline: preferences?.showWidgetOutline ?? false,
       allowInjectedKeys: preferences?.allowInjectedKeys ?? false,
     };
   }
@@ -566,6 +572,7 @@ export class SettingsService extends EventEmitter {
 
         app.setLoginItemSettings({
           openAtLogin: preferences.launchAtLogin,
+          ...(isWindows() ? { args: [SILENT_START_ARG] } : {}),
         });
       })
       .catch((error) => {

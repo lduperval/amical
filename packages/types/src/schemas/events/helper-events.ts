@@ -50,12 +50,37 @@ export type ActiveDisplayChangedEvent = z.infer<
   typeof ActiveDisplayChangedEventSchema
 >;
 
+// Unsolicited notification (Linux helper) forwarded from the Amical GNOME
+// Shell extension after the user drags a window the desktop asked it to
+// manage (see placeWidgetWindow). Coordinates are compositor frame
+// coordinates, which a native Wayland client cannot read itself.
+export const WidgetWindowMovedPayloadSchema = z.object({
+  title: z.string(),
+  x: z.number().int(),
+  y: z.number().int(),
+  width: z.number().int(),
+  height: z.number().int(),
+});
+export type WidgetWindowMovedPayload = z.infer<
+  typeof WidgetWindowMovedPayloadSchema
+>;
+
+export const WidgetWindowMovedEventSchema = z.object({
+  type: z.literal("widgetWindowMoved"),
+  payload: WidgetWindowMovedPayloadSchema,
+  timestamp: z.string().datetime({ offset: true }).optional(),
+});
+export type WidgetWindowMovedEvent = z.infer<
+  typeof WidgetWindowMovedEventSchema
+>;
+
 // This will be the primary schema for unsolicited events from Swift
 export const HelperEventSchema = z.discriminatedUnion("type", [
   KeyDownEventSchema,
   KeyUpEventSchema,
   FlagsChangedEventSchema, // Added FlagsChangedEventSchema
   ActiveDisplayChangedEventSchema,
+  WidgetWindowMovedEventSchema,
   // Future: Add other event types like mouse events, etc.
 ]);
 export type HelperEvent = z.infer<typeof HelperEventSchema>;

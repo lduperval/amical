@@ -1,8 +1,8 @@
 import { BrowserWindow } from "electron";
-import { Effect, Layer, Runtime, Scope } from "effect";
+import { Context, Effect, Layer, Scope } from "effect";
 
 import { logger } from "../main/logger";
-import { down, up } from "../main/runtime/layer-helpers";
+import { down, orDiePreservingCause, up } from "../main/runtime/layer-helpers";
 import {
   AppScopeTag,
   AuthServiceTag,
@@ -12,7 +12,10 @@ import type { AuthService } from "./auth-service";
 import { SettingsSyncClient } from "./settings-sync-client";
 import type { SyncClient } from "./settings-sync-runner";
 import { SettingsSyncSupervisor } from "./settings-sync-supervisor";
-import type { SettingsSyncLifecycleError } from "./settings-sync-errors";
+import type {
+  SettingsSyncFlushFailed,
+  SettingsSyncLifecycleError,
+} from "./settings-sync-errors";
 
 export class SettingsSyncService {
   private constructor(private readonly supervisor: SettingsSyncSupervisor) {}
@@ -20,13 +23,13 @@ export class SettingsSyncService {
   private static make(
     authService: AuthService,
     client?: SyncClient,
-    runtime: Runtime.Runtime<never> = Runtime.defaultRuntime,
+    context: Context.Context<never> = Context.empty(),
   ): Effect.Effect<SettingsSyncService> {
     return SettingsSyncSupervisor.make(
       authService,
       client ?? new SettingsSyncClient(authService),
       notifyRenderers,
-      runtime,
+      context,
     ).pipe(Effect.map((supervisor) => new SettingsSyncService(supervisor)));
   }
 
@@ -43,22 +46,24 @@ export class SettingsSyncService {
     Effect.gen(function* () {
       const authService = yield* AuthServiceTag;
       const appScope = yield* AppScopeTag;
-      const runtime = yield* Effect.runtime<never>();
+      const context = yield* Effect.context<never>();
       const service = yield* SettingsSyncService.make(
         authService,
         undefined,
-        runtime,
+        context,
       );
       yield* Scope.addFinalizer(
         appScope,
         Effect.sync(() =>
           logger.main.info("Shutting down settings sync service..."),
         ).pipe(
-          Effect.zipRight(service.shutdown().pipe(Effect.orDie)),
-          Effect.zipLeft(down("settingsSyncService")),
+          Effect.andThen(service.shutdown().pipe(orDiePreservingCause)),
+          Effect.tap(down("settingsSyncService")),
         ),
       );
-      yield* Effect.uninterruptible(service.initialize().pipe(Effect.orDie));
+      yield* Effect.uninterruptible(
+        service.initialize().pipe(orDiePreservingCause),
+      );
       logger.main.info("Settings sync service created");
       up("settingsSyncService");
       return service;
@@ -78,6 +83,10 @@ export class SettingsSyncService {
 
   wake(): void {
     this.supervisor.wake();
+  }
+
+  flush(): Effect.Effect<void, SettingsSyncFlushFailed> {
+    return this.supervisor.flush();
   }
 
   shutdown(): Effect.Effect<void, SettingsSyncLifecycleError> {

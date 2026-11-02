@@ -1,26 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDatabase, type TestDatabase } from "../helpers/test-db";
 import { setTestDatabase } from "../setup";
-import { notes, syncOutbox } from "@/db/schema";
+import { notes, syncItemState, syncOutbox } from "@/db/schema";
 import {
   createNote,
   updateNote,
   deleteNote,
   getNotes,
   getNoteById,
-  enrollLocalNotes,
 } from "@/db/notes";
 import { loadNoteBody, saveNoteBody } from "@/db/note-body";
 import {
   applyPullPages,
   applyPushResults,
+  adoptVisibleRows,
   beginUserSyncSession,
   capturePushHeads as captureEligibleHeads,
-  clearSyncState,
   getPullCursors,
   pauseSyncSession,
-  resumeUserSyncSession,
 } from "@/db/sync";
+import { clearUserData } from "@/db/user-data";
 import { noteSyncPayload } from "@/db/settings-sync/notes";
 import { NoteSyncProvider } from "@/renderer/main/providers/sync-provider";
 import type { NoteBodyChange } from "@/notes/types";
@@ -116,16 +115,26 @@ describe("personal note sync", () => {
     expect(loadNoteBody(note.id)).toMatchObject({ markdown: "" });
   });
 
-  it("enrolls existing notes only by choice, and never adopts them into another account", async () => {
+  it("adopts guest notes once and wipes them before another account signs in", async () => {
     const local = await createNote({ title: "Device note" });
-    await beginUserSyncSession("alice");
+    saveNoteBody(local.id, "# Device draft\n");
+    const before = all()[0];
+    const fence = await beginUserSyncSession("alice");
     expect(pending()).toEqual([]);
-    enrollLocalNotes(true);
-    expect(pending()).toMatchObject([{ scopeId: "alice", syncId: local.id }]);
-    await clearSyncState();
+    await adoptVisibleRows(fence);
+    expect(all()).toEqual([{ ...before, accountId: "alice" }]);
+    expect(pending()).toMatchObject([
+      {
+        scopeId: "alice",
+        syncId: local.id,
+        desiredPayload: noteSyncPayload(before),
+      },
+    ]);
+    pauseSyncSession();
+    clearUserData();
     expect(await getNotes()).toEqual([]);
-    await beginUserSyncSession("bob");
-    enrollLocalNotes(true);
+    const bob = await beginUserSyncSession("bob");
+    await adoptVisibleRows(bob);
     expect(await getNotes()).toEqual([]);
     expect(await getNoteById(local.id)).toBeNull();
     expect(loadNoteBody(local.id).status).toBe("deleted");
@@ -134,27 +143,81 @@ describe("personal note sync", () => {
     });
     expect(await updateNote(local.id, { title: "wrong account" })).toBeNull();
     expect(await deleteNote(local.id)).toBeNull();
-    expect(
-      await capturePushHeads({
-        accountId: "bob",
-        scopeType: "user",
-        scopeId: "bob",
-      }),
-    ).toEqual([]);
-    await resumeUserSyncSession("alice");
-    expect((await getNotes())[0].id).toBe(local.id);
-    expect(pending()[0].desiredPayload).toMatchObject({ title: "Device note" });
+    expect(await capturePushHeads(bob)).toEqual([]);
+    await beginUserSyncSession("alice");
+    expect(await getNotes()).toEqual([]);
+    expect(pending()).toEqual([]);
   });
 
-  it("retains a deleted note's queued tombstone through logout and restart", async () => {
+  it("keeps blocked note recovery data while adopting its ownership", async () => {
+    const before = testDb.db
+      .insert(notes)
+      .values({
+        title: "Needs recovery",
+        contentFormat: "blocked",
+        legacyContent: "Original legacy content",
+        migrationError: "Unsupported content",
+      })
+      .returning()
+      .get()!;
+    const fence = await beginUserSyncSession("alice");
+
+    await adoptVisibleRows(fence);
+
+    expect(all()).toEqual([{ ...before, accountId: "alice" }]);
+    expect(pending()).toEqual([]);
+  });
+
+  it("does not requeue adopted notes or reset their upload deadline on resume", async () => {
+    await createNote({ title: "Adopt once" });
+    const fence = await beginUserSyncSession("alice");
+    await adoptVisibleRows(fence);
+    const before = pending();
+
+    vi.setSystemTime(Date.now() + 5000);
+    await adoptVisibleRows(fence);
+    const resumed = await beginUserSyncSession("alice");
+    await adoptVisibleRows(resumed);
+
+    expect(pending()).toEqual(before);
+    expect(testDb.db.select().from(syncItemState).all()).toHaveLength(1);
+  });
+
+  it("rolls back ownership when an adopted note cannot be queued", async () => {
+    const local = await createNote({ title: "Atomic adoption" });
+    const fence = await beginUserSyncSession("alice");
+    testDb.db.$client.exec(
+      "CREATE TRIGGER fail_note_outbox BEFORE INSERT ON sync_outbox BEGIN SELECT RAISE(ABORT, 'outbox failed'); END;",
+    );
+
+    await expect(adoptVisibleRows(fence)).rejects.toThrow();
+
+    expect(all()[0]).toMatchObject({ id: local.id, accountId: null });
+    expect(pending()).toEqual([]);
+    expect(testDb.db.select().from(syncItemState).all()).toEqual([]);
+  });
+
+  it("does not adopt notes for a stale account session", async () => {
+    const local = await createNote({ title: "Wait for current account" });
+    const alice = await beginUserSyncSession("alice");
+    const bob = await beginUserSyncSession("bob");
+
+    expect(await adoptVisibleRows(alice)).toBe(false);
+    expect(all()[0]).toMatchObject({ id: local.id, accountId: null });
+    expect(pending()).toEqual([]);
+
+    expect(await adoptVisibleRows(bob)).toBe(true);
+    expect(all()[0]).toMatchObject({ id: local.id, accountId: "bob" });
+    expect(pending()).toMatchObject([{ scopeId: "bob", syncId: local.id }]);
+  });
+
+  it("retains a deleted note's queued tombstone when sync pauses and resumes", async () => {
     const fence = await beginUserSyncSession("alice");
     await pull(REMOTE_ID, payload(), 1);
     await deleteNote(all()[0].id);
     const before = await capturePushHeads(fence);
-    await clearSyncState();
-    await beginUserSyncSession("bob");
-    await clearSyncState();
-    await resumeUserSyncSession("alice");
+    pauseSyncSession();
+    await beginUserSyncSession("alice");
     expect(await capturePushHeads(fence)).toEqual(before);
   });
 
@@ -386,23 +449,25 @@ describe("personal note sync", () => {
     expect(all()[0].content).toBe("changed");
   });
 
-  it("finishes an already-open editor save in its original account after logout", async () => {
+  it("rejects an already-open editor save after logout wipes its note", async () => {
     await beginUserSyncSession("alice");
     const note = await createNote({ title: "Open draft" });
     const body = loadNoteBody(note.id);
     if (body.status !== "ready") throw new Error("not ready");
-    await clearSyncState();
+    pauseSyncSession();
+    clearUserData();
     await beginUserSyncSession("bob");
-    saveNoteBody(note.id, "pending at logout", body.remoteVersion, body.origin);
+    expect(
+      saveNoteBody(
+        note.id,
+        "pending at logout",
+        body.remoteVersion,
+        body.origin,
+      ),
+    ).toEqual({ status: "deleted" });
     expect(await getNotes()).toEqual([]);
-    expect(pending()).toMatchObject([
-      {
-        scopeId: "alice",
-        desiredPayload: { body: { content: "pending at logout" } },
-      },
-    ]);
-    await resumeUserSyncSession("alice");
-    expect((await getNoteById(note.id))?.content).toBe("pending at logout");
+    expect(all()).toEqual([]);
+    expect(pending()).toEqual([]);
   });
 
   it("recovers an unsaved editor draft after a remote deletion without restoring the deleted identity", async () => {

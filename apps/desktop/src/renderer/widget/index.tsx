@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nextProvider } from "react-i18next";
+import { useWidgetOutline } from "./hooks/useWidgetOutline";
 import { WidgetPage } from "./pages/widget";
 import { api, trpcClient } from "@/trpc/react";
 import { ThemeProvider } from "@/components/theme-provider";
@@ -77,6 +78,7 @@ const queryClient = new QueryClient({
 
 const WidgetShell: React.FC = () => {
   usePostHog("widget");
+  useWidgetOutline();
 
   return (
     <>

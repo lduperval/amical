@@ -5,12 +5,14 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RecordingStatus } from "@/hooks/useRecording";
 
-const mocks = vi.hoisted(() => ({
-  dragWidget: vi.fn(),
+vi.mock("@/components/RippleWaveform", () => ({
+  RippleWaveform: () => null,
 }));
 
-vi.mock("@/components/Waveform", () => ({
-  Waveform: () => null,
+const mocks = vi.hoisted(() => ({
+  dragWidget: vi.fn(),
+  setControlSize: vi.fn(),
+  linuxWindowingMode: undefined as "x11" | "wayland" | "none" | undefined,
 }));
 
 vi.mock("@/hooks/useFeatureFlag", () => ({
@@ -20,11 +22,15 @@ vi.mock("@/hooks/useFeatureFlag", () => ({
 vi.mock("@/trpc/react", () => ({
   api: {
     widget: {
+      setControlSize: { useMutation: () => ({ mutate: mocks.setControlSize }) },
       openNotesWindow: {
         useMutation: () => ({ mutateAsync: vi.fn() }),
       },
       drag: {
         useMutation: () => ({ mutate: mocks.dragWidget }),
+      },
+      linuxWindowingMode: {
+        useQuery: () => ({ data: mocks.linuxWindowingMode }),
       },
     },
   },
@@ -42,6 +48,9 @@ import { FloatingButton } from "@/renderer/widget/pages/widget/components/Floati
 
 afterEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  mocks.linuxWindowingMode = undefined;
   Object.defineProperty(window, "electronAPI", {
     configurable: true,
     value: undefined,
@@ -49,6 +58,57 @@ afterEach(() => {
 });
 
 describe("FloatingButton recording triggers", () => {
+  it("reports the actual pill size initially and when its dimensions change", () => {
+    Object.defineProperty(window, "electronAPI", {
+      configurable: true,
+      value: { platform: "linux" },
+    });
+    let width = 108;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+      () => ({ width, height: 24 }) as DOMRect,
+    );
+    let notifyResize: () => void = () => {};
+    const disconnect = vi.fn();
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: () => void) {
+          notifyResize = callback;
+        }
+        observe() {}
+        disconnect = disconnect;
+      },
+    );
+    const view = render(
+      React.createElement(FloatingButton, {
+        recordingStatus: {
+          sessionId: null,
+          state: "idle",
+          mode: "ptt",
+          isDraft: false,
+          stopKind: "none",
+          stopOrigin: "none",
+        },
+        audioLevelRef: { current: 0 },
+        startRecording: vi.fn(),
+        stopRecording: vi.fn(),
+        dismissRecording: vi.fn(),
+      }),
+    );
+    expect(mocks.setControlSize).toHaveBeenLastCalledWith({
+      width: 108,
+      height: 24,
+    });
+    width = 136;
+    notifyResize();
+    expect(mocks.setControlSize).toHaveBeenLastCalledWith({
+      width: 136,
+      height: 24,
+    });
+    view.unmount();
+    expect(disconnect).toHaveBeenCalledOnce();
+  });
+
   it("keeps an idle Linux recording control visible and clickable", () => {
     Object.defineProperty(window, "electronAPI", {
       configurable: true,
@@ -66,7 +126,7 @@ describe("FloatingButton recording triggers", () => {
           stopKind: "none",
           stopOrigin: "none",
         },
-        audioLevels: [],
+        audioLevelRef: { current: 0 },
         startRecording,
         stopRecording: vi.fn(),
         dismissRecording: vi.fn(),
@@ -93,7 +153,7 @@ describe("FloatingButton recording triggers", () => {
           stopKind: "none",
           stopOrigin: "none",
         },
-        audioLevels: [],
+        audioLevelRef: { current: 0 },
         startRecording: vi.fn(),
         stopRecording: vi.fn(),
         dismissRecording: vi.fn(),
@@ -129,6 +189,56 @@ describe("FloatingButton recording triggers", () => {
       { phase: "move", screenX: 140, screenY: 230 },
       { phase: "end", screenX: 140, screenY: 230 },
     ]);
+  });
+
+  it("offers a compositor drag grip on native Wayland instead of main-process drags", () => {
+    Object.defineProperty(window, "electronAPI", {
+      configurable: true,
+      value: { platform: "linux" },
+    });
+    mocks.linuxWindowingMode = "wayland";
+
+    render(
+      React.createElement(FloatingButton, {
+        recordingStatus: {
+          sessionId: null,
+          state: "idle",
+          mode: "ptt",
+          isDraft: false,
+          stopKind: "none",
+          stopOrigin: "none",
+        },
+        audioLevelRef: { current: 0 },
+        startRecording: vi.fn(),
+        stopRecording: vi.fn(),
+        dismissRecording: vi.fn(),
+      }),
+    );
+
+    // The grip hands the drag to the compositor (xdg_toplevel move); the
+    // main process cannot move a native Wayland window itself.
+    // jsdom does not model the vendor property, so read what React set.
+    const grip = screen.getByTitle("Drag to move");
+    expect(
+      (grip.style as unknown as { WebkitAppRegion?: string }).WebkitAppRegion,
+    ).toBe("drag");
+
+    const button = screen.getByRole("button", { name: "Start recording" });
+    const bubble = button.parentElement?.parentElement;
+    fireEvent.pointerDown(bubble!, {
+      button: 1,
+      buttons: 4,
+      pointerId: 3,
+      screenX: 10,
+      screenY: 10,
+    });
+    fireEvent.pointerUp(bubble!, {
+      button: 1,
+      pointerId: 3,
+      screenX: 10,
+      screenY: 10,
+    });
+    expect(mocks.dragWidget).not.toHaveBeenCalled();
   });
 
   it.each(
@@ -174,7 +284,7 @@ describe("FloatingButton recording triggers", () => {
       render(
         React.createElement(FloatingButton, {
           recordingStatus,
-          audioLevels: [],
+          audioLevelRef: { current: 0 },
           startRecording,
           stopRecording,
           dismissRecording,

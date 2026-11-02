@@ -3,9 +3,11 @@ import { logger } from "../logger";
 import {
   closeSessionTrace,
   openSessionTrace,
+  markSessionTraceAnchor,
   recordPoint,
 } from "../telemetry/dictation-trace";
 import { ErrorCodes, type ErrorCode } from "../../types/error";
+import type { AudioCaptureInfo } from "../../types/audio-capture";
 import {
   createProvisionalTranscription,
   enrichTranscriptionBySession,
@@ -83,6 +85,10 @@ export interface RecordingLifecycleDeps {
   isDraftChordActive: () => boolean;
   /** Grammar-side Enter routing arm (shortcut-manager draft mode). */
   setDraftInputActive: (armed: boolean) => void;
+  /** A session paste the helper acknowledged (vocabulary learning hook). */
+  onSessionPasteConfirmed?: (session: SessionId, text: string) => void;
+  /** A post-lifecycle paste (draft confirm, paste-latest) was dispatched. */
+  onOtherPaste?: () => void;
   audioFilePathFor: (session: SessionId) => string;
   tuning: LifecycleTuning;
   timers?: ShellTimerHost;
@@ -116,6 +122,7 @@ export interface RecordingLifecycle {
     session: SessionId,
     chunk: Float32Array,
     isFinalChunk: boolean,
+    captureInfo?: AudioCaptureInfo,
   ): Promise<void>;
 
   // Surface state
@@ -257,6 +264,8 @@ export function createRecordingLifecycle(
         isLifecycleIdle: () =>
           shell.getSnapshot().projection.publicState === "idle",
         setDraftInputActive: deps.setDraftInputActive,
+        onSessionPasteConfirmed: deps.onSessionPasteConfirmed,
+        onOtherPaste: deps.onOtherPaste,
       });
 
       return {
@@ -444,10 +453,15 @@ export function createRecordingLifecycle(
       now.publicState === "starting" &&
       snapshot.sessionId !== null
     ) {
+      openSessionTrace(snapshot.sessionId, {});
       sessionWork.open(snapshot.sessionId);
       transcription.open(snapshot.sessionId);
+      transcription.setDraft(
+        snapshot.sessionId,
+        snapshot.metadata?.isDraft === true,
+      );
       traceDisposition = null;
-      openSessionTrace(snapshot.sessionId, {});
+      markSessionTraceAnchor(snapshot.sessionId);
       // Wedge watchdog: every stage is bounded, so a session outliving the
       // whole budget means a wedged timer or port — force-reset (R10). A
       // delivery-region fiber: the IDLE edge retires it (canceller clears
@@ -498,6 +512,14 @@ export function createRecordingLifecycle(
     if (was.publicState === "recording" && now.publicState !== "recording") {
       recordingStoppedAt = performance.now();
       clearReminder();
+    }
+
+    if (
+      now.publicState === "stopping" &&
+      was.publicState !== "stopping" &&
+      snapshot.sessionId
+    ) {
+      recordPoint(snapshot.sessionId, "lifecycle.recording-stopping");
     }
 
     if (now.stopOrigin === "auto" && was.stopOrigin !== "auto") {
@@ -627,8 +649,12 @@ export function createRecordingLifecycle(
       failureDetails.set(session, { uiMessage: failure.message });
       recorder.captureFailed(session, ErrorCodes.MICROPHONE_CAPTURE_FAILED);
     },
-    handleAudioChunk: (session, chunk, isFinalChunk) =>
-      recorder.handleAudioChunk(session, chunk, isFinalChunk),
+    handleAudioChunk: (session, chunk, isFinalChunk, captureInfo) => {
+      if (captureInfo && shell.getSnapshot().sessionId === session) {
+        recordPoint(session, "lifecycle.audio-capture", captureInfo);
+      }
+      return recorder.handleAudioChunk(session, chunk, isFinalChunk);
+    },
 
     getSnapshot: () => shell.getSnapshot(),
     onSnapshot: (listener) => shell.onSnapshot(listener),

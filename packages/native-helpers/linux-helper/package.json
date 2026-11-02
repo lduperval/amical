@@ -5,12 +5,19 @@
   "private": true,
   "scripts": {
     "build": "pnpm build:native",
-    "build:native": "cargo build --release && mkdir -p bin && cp target/release/linux-helper bin/linux-helper",
+    "build:native": "node scripts/build.mjs",
+    "build:uinput": "node scripts/build.mjs uinput",
     "clean": "rm -rf target bin .turbo",
-    "dev": "cargo build && mkdir -p bin && cp target/debug/linux-helper bin/linux-helper"
+    "dev": "node scripts/build.mjs --debug",
+    "verify:uinput": "node scripts/verify.mjs uinput",
+    "build:gnome-ext": "node scripts/build.mjs gnome_ext",
+    "verify:gnome-ext": "node scripts/verify.mjs gnome_ext",
+    "pack:gnome-extension": "node scripts/pack-gnome-extension.mjs",
+    "check:gnome-extension": "node --input-type=module --check < gnome-extension/amical@amical.ai/extension.js"
   },
   "files": [
-    "bin/*"
+    "bin/*",
+    "bin/gnome-extension/*"
   ],
   "keywords": [
     "rust",

@@ -76,6 +76,12 @@ export const vocabulary = sqliteTable(
     scopeId: text("scope_id").notNull().default(""),
     word: text("word").notNull(),
     replacementWord: text("replacement_word"),
+    // "auto" rows were learned from a correction on this device; the marker
+    // and the heard form stay local (not in the sync payload).
+    source: text("source", { enum: ["manual", "auto"] })
+      .notNull()
+      .default("manual"),
+    observedSource: text("observed_source"),
     dateAdded: integer("date_added", { mode: "timestamp" })
       .notNull()
       .default(sql`(unixepoch())`),
@@ -255,8 +261,7 @@ export const activityOutbox = sqliteTable(
   (table) => [index("activity_outbox_created_idx").on(table.createdAt)],
 );
 
-// Desktop retains device history across accounts. Account changes re-enroll
-// successful rows; restarting the same account preserves their pending flags.
+// Historical account-replay marker. Runtime no longer uses it; logout clears it.
 export const activityMaterializationState = sqliteTable(
   "activity_materialization_state",
   {
@@ -351,6 +356,7 @@ export interface AppSettingsData {
     /** Centre point of the floating recording control, normalized to the
      * current display work area so it survives display and resolution changes. */
     widgetPosition?: {
+      displayId?: number;
       xRatio: number;
       yRatio: number;
     };
@@ -420,6 +426,7 @@ export interface AppSettingsData {
     muteDictationSounds?: boolean;
     autoDictateOnNewNote?: boolean;
     preserveClipboard?: boolean;
+    showWidgetOutline?: boolean;
     // Windows only: honor injected keystrokes (LLKHF_INJECTED) when matching
     // shortcuts instead of filtering them out. See the native ShortcutMonitor.
     allowInjectedKeys?: boolean;
@@ -486,9 +493,6 @@ export const notes = sqliteTable("notes", {
     .notNull()
     .$defaultFn(() => createEntityId("note")),
   accountId: text("account_id"),
-  localOnly: integer("local_only", { mode: "boolean" })
-    .notNull()
-    .default(false),
   syncError: text("sync_error"),
   title: text("title").notNull(),
   content: text("content").default(""), // Authoritative body when contentFormat is markdown-v1
@@ -523,8 +527,9 @@ export const yjsUpdates = sqliteTable(
   ],
 );
 
-export const dailyStats = sqliteTable(
-  "daily_stats",
+// Historical counters are retained unchanged; dictationStats owns live totals.
+export const dailyStatsBackup = sqliteTable(
+  "daily_stats_backup",
   {
     id: text("id").notNull().primaryKey(),
     date: text("date").notNull(),
@@ -535,6 +540,13 @@ export const dailyStats = sqliteTable(
   },
   (table) => [uniqueIndex("daily_stats_date_unique_idx").on(table.date)],
 );
+
+export const dictationStats = sqliteTable("dictation_stats", {
+  scope: text("scope").notNull().primaryKey(),
+  totalWords: integer("total_words").notNull().default(0),
+  totalTranscriptions: integer("total_transcriptions").notNull().default(0),
+  revision: integer("revision").notNull().default(0),
+});
 
 // Skills = personalization rules that the desktop resolves at dictation
 // time into the wire-format `Skill` proto message. Each row is one
@@ -624,7 +636,5 @@ export type Note = typeof notes.$inferSelect;
 export type NewNote = typeof notes.$inferInsert;
 export type YjsUpdate = typeof yjsUpdates.$inferSelect;
 export type NewYjsUpdate = typeof yjsUpdates.$inferInsert;
-export type DailyStat = typeof dailyStats.$inferSelect;
-export type NewDailyStat = typeof dailyStats.$inferInsert;
 export type Skill = typeof skills.$inferSelect;
 export type NewSkill = typeof skills.$inferInsert;

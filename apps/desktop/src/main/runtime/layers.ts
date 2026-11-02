@@ -17,7 +17,7 @@
  *
  * 1. Releases register on the app-owned scope (AppScopeTag) via
  *    Scope.addFinalizer (layer-helpers.ts addRelease), NOT via
- *    Effect.acquireRelease: Layer.build is transactional in effect 3.21 and
+ *    Effect.acquireRelease: Layer.build is transactional and
  *    closes layer scopes on partial build failure, which would tear down
  *    PostHog before the crash path can flush telemetry (verified
  *    empirically; see app-runtime.ts). Finalizers on the app scope are
@@ -98,6 +98,7 @@ import { NativeBridge } from "../../services/platform/native-bridge-service";
 import { VADService } from "../../services/vad-service";
 import { TranscriptionService } from "../../services/transcription-service";
 import { RecordingLifecycleLive } from "../lifecycle/live";
+import { VocabularyLearningService } from "../../services/vocabulary-learning/service";
 import { ShortcutManager } from "../managers/shortcut-manager";
 import { AutoUpdaterService } from "../services/auto-updater";
 import { WindowManager } from "../core/window-manager";
@@ -108,6 +109,7 @@ import { createContext } from "../../trpc/context";
 import {
   SettingsServiceTag,
   SettingsSyncServiceTag,
+  ActivityReportingServiceTag,
   AuthServiceTag,
   PostHogClientTag,
   TelemetryServiceTag,
@@ -168,6 +170,7 @@ export const ServicesBundleLive: Layer.Layer<
   | SettingsServiceTag
   | AuthServiceTag
   | SettingsSyncServiceTag
+  | ActivityReportingServiceTag
   | PostHogClientTag
   | TelemetryServiceTag
   | FeatureFlagServiceTag
@@ -197,6 +200,7 @@ export const ServicesBundleLive: Layer.Layer<
       settingsService: yield* SettingsServiceTag,
       authService: yield* AuthServiceTag,
       settingsSyncService: yield* SettingsSyncServiceTag,
+      activityReportingService: yield* ActivityReportingServiceTag,
       vadService: yield* VadServiceTag,
       nativeBridge: yield* NativeBridgeTag,
       autoUpdaterService: yield* AutoUpdaterServiceTag,
@@ -271,6 +275,7 @@ export const AppLive: Layer.Layer<
   Layer.provideMerge(
     Layer.mergeAll(
       ShortcutManager.Live,
+      VocabularyLearningService.Live,
       AutoUpdaterService.Live,
       SettingsSyncService.Live,
       ActivityReportingService.Live,

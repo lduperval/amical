@@ -47,8 +47,8 @@
   <a href="https://amical.ai/android">
     <img src="https://amical.ai/Store=Google%20Play,%20Type=Dark,%20Language=English.svg" alt="Get it on Google Play" height="60">
   </a>
-  <a href="https://amical.ai/beta">
-    <img src="https://amical.ai/ios_beta_button.svg" alt="Apply for iOS Beta" height="60">
+  <a href="https://amical.ai/ios">
+    <img src="https://amical.ai/Store=App%20Store,%20Type=Dark,%20Language=English.svg" alt="Download on the App Store" width="180" height="60">
   </a>
 </p>
 
@@ -115,7 +115,7 @@ See [BUILD.md](BUILD.md) for detailed instructions, including building the Linux
 ### Prerequisites
 
 - [Node.js](https://nodejs.org/) 24.x
-- pnpm 10.15.0 (the version pinned in `package.json`)
+- pnpm 10.34.5 (the version pinned in `package.json`)
 - CMake 3.20 or later
 - **macOS:** Xcode or the Xcode Command Line Tools with Swift 5.9 or later
   (`xcode-select --install`). Local Whisper transcription requires macOS 15 or
@@ -129,7 +129,7 @@ See [BUILD.md](BUILD.md) for detailed instructions, including building the Linux
 Clone with submodules so the Whisper sources are available:
 
 ```bash
-git clone --recurse-submodules https://github.com/amicalhq/amical.git
+git clone --recurse-submodules https://github.com/lduperval/amical.git
 cd amical
 ```
 
@@ -172,6 +172,16 @@ permissions. Only configure `apps/desktop/.env` from
 telemetry integrations, and replace its placeholder values before use.
 
 ### Run checks
+
+Workspace builds and typechecks use TypeScript 7.0.2. The `@typescript/native`
+dependency is an alias for the native compiler and provides `tsc`. The
+`typescript` dependency is an alias for Microsoft's TypeScript 6 compatibility
+package, which provides the compiler API used by ESLint and other tools. This
+follows [Microsoft's side-by-side setup](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-6-0).
+Run `pnpm exec tsc --version` to check the build compiler version.
+
+For VS Code, install the recommended [TypeScript 7 extension](https://marketplace.visualstudio.com/items?itemName=TypeScriptTeam.native-preview).
+The workspace settings point it at the same native compiler.
 
 Before opening a pull request, run:
 

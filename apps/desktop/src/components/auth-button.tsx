@@ -12,6 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { SidebarMenuItem, SidebarMenuButton } from "@/components/ui/sidebar";
+import { useLogout } from "@/hooks/useLogout";
 
 // Helper function to generate initials from email or name
 function getInitials(email?: string | null, name?: string | null): string {
@@ -33,6 +34,8 @@ function getInitials(email?: string | null, name?: string | null): string {
 
 export function AuthButton() {
   const [isLoading, setIsLoading] = useState(false);
+  const logout = useLogout();
+  const accountButtonRef = useRef<HTMLButtonElement>(null);
   const loadingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Get current auth status
@@ -75,24 +78,6 @@ export function AuthButton() {
     },
   });
 
-  const logoutMutation = api.auth.logout.useMutation({
-    onMutate: () => {
-      setIsLoading(true);
-    },
-    onSuccess: () => {
-      toast.success("Signed out successfully");
-      setIsLoading(false);
-      // Invalidate auth queries
-      authStatusQuery.refetch();
-    },
-    onError: (error) => {
-      toast.error("Failed to sign out", {
-        description: error.message,
-      });
-      setIsLoading(false);
-    },
-  });
-
   // Subscribe to auth state changes
   api.auth.onAuthStateChange.useSubscription(undefined, {
     onData: (data) => {
@@ -100,8 +85,12 @@ export function AuthButton() {
       clearLoadingTimeout();
       authStatusQuery.refetch();
       setIsLoading(false);
-      // Only show toast for actual authentication events, not initial state
-      if (data.eventType === "authenticated" && data.isAuthenticated) {
+      // Failed logout also emits authenticated to resume sync for the same session.
+      if (
+        data.eventType === "authenticated" &&
+        data.isAuthenticated &&
+        !authStatusQuery.data?.isAuthenticated
+      ) {
         toast.success("Signed in successfully");
       }
     },
@@ -114,10 +103,7 @@ export function AuthButton() {
     loginMutation.mutate();
   };
 
-  const handleLogout = () => {
-    logoutMutation.mutate();
-  };
-
+  const isBusy = isLoading || logout.isBusy;
   const isAuthenticated = authStatusQuery.data?.isAuthenticated || false;
   const userEmail = authStatusQuery.data?.userEmail;
   const userName = authStatusQuery.data?.userName;
@@ -133,7 +119,7 @@ export function AuthButton() {
     );
   }
 
-  if (isAuthenticated) {
+  if (isAuthenticated || authStatusQuery.data?.userId) {
     const initials = getInitials(userEmail, userName);
     const displayName = userName || userEmail || "Account";
 
@@ -141,7 +127,7 @@ export function AuthButton() {
       <SidebarMenuItem>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <SidebarMenuButton disabled={isLoading}>
+            <SidebarMenuButton ref={accountButtonRef} disabled={isBusy}>
               <Avatar className="h-4 w-4">
                 <AvatarFallback className="text-[10px]">
                   {initials}
@@ -165,11 +151,11 @@ export function AuthButton() {
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
             <DropdownMenuItem
-              onClick={handleLogout}
-              disabled={isLoading}
+              onClick={() => logout.requestLogout(accountButtonRef)}
+              disabled={isBusy}
               className="text-destructive focus:text-destructive"
             >
-              {isLoading ? (
+              {isBusy ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               ) : (
                 <LogOut className="mr-2 h-4 w-4" />
@@ -184,8 +170,8 @@ export function AuthButton() {
 
   return (
     <SidebarMenuItem>
-      <SidebarMenuButton onClick={handleLogin} disabled={isLoading}>
-        {isLoading ? (
+      <SidebarMenuButton onClick={handleLogin} disabled={isBusy}>
+        {isBusy ? (
           <Loader2 className="h-4 w-4 animate-spin" />
         ) : (
           <LogIn className="h-4 w-4" />

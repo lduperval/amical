@@ -1,28 +1,30 @@
 import { app } from "electron";
 import started from "electron-squirrel-startup";
+import path from "node:path";
 import { showFatalStartupDialog } from "./fatal-startup-dialog";
-import { shouldUseXWaylandForFloatingWidget } from "../utils/linux-windowing";
+import { getLinuxOzonePlatform } from "../utils/linux-windowing";
 
 // Configure Chromium synchronously in the entry point, before loading the
-// application's dependency graph. These switches and the acceleration setting
-// must be applied before Electron initializes its display/GPU services.
+// application's dependency graph. The Ozone switch must be applied before
+// Electron initializes its display services.
 if (!started && process.platform === "linux") {
-  if (
-    shouldUseXWaylandForFloatingWidget({
-      platform: process.platform,
-      sessionType: process.env.XDG_SESSION_TYPE,
-      argv: process.argv,
-    })
-  ) {
-    app.commandLine.appendSwitch("ozone-platform", "x11");
+  const ozonePlatform = getLinuxOzonePlatform({
+    platform: process.platform,
+    sessionType: process.env.XDG_SESSION_TYPE,
+    argv: process.argv,
+    electronVersion: process.versions.electron,
+  });
+  if (ozonePlatform) {
+    app.commandLine.appendSwitch("ozone-platform", ozonePlatform);
   }
 
-  if (!process.argv.includes("--enable-gpu")) {
+  // GPU compositing is the reliable path on current GNOME/XWayland systems.
+  // Forcing software rendering makes Chromium use
+  // x11_software_bitmap_presenter, which can fail XGetWindowAttributes and
+  // leave every BrowserWindow invisible even though its renderer is running.
+  // Keep software rendering available as an explicit diagnostic fallback.
+  if (process.argv.includes("--disable-gpu")) {
     app.disableHardwareAcceleration();
-    // Explicitly keep window compositing on the software path as well. This
-    // avoids GPU-backed presentation for the main window alongside the
-    // transparent floating widget on Linux/XWayland.
-    app.commandLine.appendSwitch("disable-gpu-compositing");
   }
 }
 
@@ -30,9 +32,25 @@ if (!started && process.platform === "linux") {
 // happen before ./app loads — requestSingleInstanceLock() there keys its lock
 // off userData, and an isolated path keeps test instances from colliding with
 // a real running Amical. sessionData is set too so Chromium caches follow.
-if (process.env.AMICAL_E2E_USER_DATA_DIR) {
-  app.setPath("userData", process.env.AMICAL_E2E_USER_DATA_DIR);
-  app.setPath("sessionData", process.env.AMICAL_E2E_USER_DATA_DIR);
+// Unpackaged dev builds get their own profile for the same reason, so dev can
+// run next to an installed Amical.
+const profileDir =
+  process.env.AMICAL_E2E_USER_DATA_DIR ||
+  (app.isPackaged
+    ? undefined
+    : path.join(app.getPath("appData"), "Amical-dev"));
+if (profileDir) {
+  app.setPath("userData", profileDir);
+  app.setPath("sessionData", profileDir);
+}
+
+// macOS activates a regular app when it launches from a terminal, which takes
+// focus and switches Spaces. Unpackaged builds launch as an accessory app
+// (never activated at launch), then turn regular at ready; the startup windows
+// open with showInactive (see AppManager.initialize).
+if (!app.isPackaged && process.platform === "darwin") {
+  app.setActivationPolicy("accessory");
+  app.once("ready", () => app.setActivationPolicy("regular"));
 }
 
 if (started) {

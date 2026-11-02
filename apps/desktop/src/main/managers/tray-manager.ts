@@ -2,12 +2,13 @@ import { app, Tray, Menu, nativeImage } from "electron";
 import * as path from "path";
 import { logger } from "../logger";
 import type { WindowManager } from "../core/window-manager";
-import { isMacOS, isWindows } from "../../utils/platform";
+import { isLinux, isMacOS, isWindows } from "../../utils/platform";
 import { initMainI18n } from "../../i18n/main";
 
 export class TrayManager {
   private static instance: TrayManager | null = null;
   private tray: Tray | null = null;
+  private openingWindow = false;
   private windowManager: WindowManager | null = null;
 
   private constructor() {}
@@ -49,24 +50,19 @@ export class TrayManager {
     // Set tooltip
     this.tray.setToolTip(t("tray.tooltip"));
 
+    // Click and double-click can arrive before async window creation finishes.
+    const openWindow = () => this.openConsole("tray");
+
+    if (isWindows()) {
+      this.tray.on("click", openWindow);
+      this.tray.on("double-click", openWindow);
+    }
+
     // Create context menu
     const contextMenu = Menu.buildFromTemplate([
       {
         label: t("tray.openConsole"),
-        click: async () => {
-          logger.main.info("Open console requested from tray");
-          if (this.windowManager) {
-            // During onboarding, focus the wizard instead of opening the main
-            // window beside it (same guard as activate / second-instance).
-            const onboardingWindow = this.windowManager.getOnboardingWindow();
-            if (onboardingWindow && !onboardingWindow.isDestroyed()) {
-              onboardingWindow.show();
-              onboardingWindow.focus();
-              return;
-            }
-            await this.windowManager.createOrShowMainWindow();
-          }
-        },
+        click: openWindow,
       },
       { type: "separator" as const },
       ...(isMacOS()
@@ -96,13 +92,51 @@ export class TrayManager {
     // Set the context menu
     this.tray.setContextMenu(contextMenu);
 
+    // Double-clicking the icon opens the console. Electron only emits
+    // "double-click" on macOS and Windows. On Linux the tray is a
+    // StatusNotifierItem: GNOME's appindicator support turns a primary-button
+    // double-click into the item's Activate call, which Electron reports as
+    // "click" (a single primary click opens the menu there, so "click" never
+    // fires for it). macOS/Windows keep single clicks for the menu.
+    if (isLinux()) {
+      this.tray.on("click", openWindow);
+    } else if (isMacOS()) {
+      this.tray.on("double-click", openWindow);
+    }
+
     logger.main.info("Tray initialized successfully");
+  }
+
+  async openConsole(source: string): Promise<void> {
+    if (!this.windowManager || this.openingWindow) {
+      return;
+    }
+    this.openingWindow = true;
+    try {
+      logger.main.info("Open console requested", { source });
+      // During onboarding, focus the wizard instead of opening the main
+      // window beside it (same guard as activate / second-instance).
+      const onboardingWindow = this.windowManager.getOnboardingWindow();
+      if (onboardingWindow && !onboardingWindow.isDestroyed()) {
+        if (onboardingWindow.isMinimized()) {
+          onboardingWindow.restore();
+        }
+        onboardingWindow.show();
+        onboardingWindow.focus();
+        return;
+      }
+      await this.windowManager.createOrShowMainWindow();
+    } catch (error) {
+      logger.main.error("Failed to open window from tray", error);
+    } finally {
+      this.openingWindow = false;
+    }
   }
 
   private getIconPath(): string {
     // Use appropriate icon based on platform
     const iconName = isWindows()
-      ? "icon-256x256.png" // Windows uses standard icon
+      ? "tray.ico" // Windows uses a dedicated symbol at each display scale
       : "iconTemplate.png"; // macOS uses template naming convention
 
     if (app.isPackaged) {

@@ -13,6 +13,7 @@ import {
   DEFAULT_HISTORY_RETENTION_PERIOD,
 } from "../../constants/history-retention";
 import { supportedLocales } from "../../i18n/shared";
+import { getRelaunchArgs } from "../../main/launch-options";
 
 // FormatterConfig schema
 const FormatterConfigSchema = z.object({
@@ -78,6 +79,7 @@ const AppPreferencesSchema = z.object({
   muteDictationSounds: z.boolean().optional(),
   autoDictateOnNewNote: z.boolean().optional(),
   preserveClipboard: z.boolean().optional(),
+  showWidgetOutline: z.boolean().optional(),
   allowInjectedKeys: z.boolean().optional(),
 });
 
@@ -418,6 +420,48 @@ export const settingsRouter = createRouter({
             "Failed to load widget visibility preference",
             error,
           );
+        }
+      };
+
+      void emitInitialPreference();
+
+      return () => {
+        active = false;
+        settingsService.off("preferences-changed", handlePreferencesChanged);
+      };
+    });
+  }),
+
+  // Diagnostic outline preference, including its initial value.
+  // eslint-disable-next-line deprecation/deprecation
+  widgetOutlinePreference: procedure.subscription(({ ctx }) => {
+    return observable<boolean>((emit) => {
+      const settingsService = ctx.services.settingsService;
+      const logger = ctx.logger;
+      let active = true;
+      let receivedOutlineUpdate = false;
+
+      const handlePreferencesChanged = ({
+        changes,
+      }: {
+        changes: Partial<AppPreferences>;
+      }) => {
+        if (changes.showWidgetOutline !== undefined) {
+          receivedOutlineUpdate = true;
+          emit.next(changes.showWidgetOutline);
+        }
+      };
+
+      settingsService.on("preferences-changed", handlePreferencesChanged);
+
+      const emitInitialPreference = async () => {
+        try {
+          const preferences = await settingsService.getPreferences();
+          if (active && !receivedOutlineUpdate) {
+            emit.next(preferences.showWidgetOutline);
+          }
+        } catch (error) {
+          logger?.main.error("Failed to load widget outline preference", error);
         }
       };
 
@@ -926,7 +970,7 @@ export const settingsRouter = createRouter({
       return true;
     }
 
-    app.relaunch();
+    app.relaunch({ args: getRelaunchArgs() });
     app.quit();
     return true;
   }),
@@ -1042,7 +1086,7 @@ export const settingsRouter = createRouter({
         app.quit();
       } else {
         // Production mode: relaunch the app
-        app.relaunch();
+        app.relaunch({ args: getRelaunchArgs() });
         app.quit();
       }
 

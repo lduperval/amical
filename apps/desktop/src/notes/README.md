@@ -57,7 +57,7 @@ skip converted rows and retry failed rows, including notes blocked by an earlier
 formatting policy.
 Opening also checks the per-note marker, so it cannot overwrite an edited body.
 
-Recovery data is intentionally not pruned. Work on a database copy: inspect
+Recovery data stays until the note is deleted or the user logs out. Work on a database copy: inspect
 `legacy_content`, `migration_error`, and all `yjs_updates` rows for the note,
 ordered by `id`. After fixing the source or adding a tested converter, rerun
 the migration on the copy.
@@ -106,15 +106,28 @@ and map to the version-1 Markdown payload defined by `NoteSyncPayloadSchema` in
 Legacy bodies and recovery blobs are never uploaded.
 
 The pending schema migrations run in order: `0011_notes_ids`,
-`0012_settings_ids`, `0013_notes_markdown`, then `0014_notes_sync`. Note primary keys and Yjs note
+`0012_settings_ids`, `0013_notes_markdown`, then `0014_notes_sync`.
+`0017_notes_auto_adoption` removes the obsolete local-only flag. Note primary keys and Yjs note
 foreign keys are strings (`nt_` plus a complete 24-character CUID2). The note's `id` is also the cloud `syncId`; there
 is no separate sync-ID column or permanent integer-ID mapping. Notes created while signed in belong to that account. Existing
-unowned notes remain on the device until the user chooses “Sync these notes” in
-the notes list. “Keep on this device” dismisses enrollment for those notes.
-Account-owned notes are hidden after sign-out and from other accounts. Their
-outboxes, tombstones, and accepted server state are retained for the owning
-account. An already-open editor can finish its pending body save in its original
-account even if sign-out has just hidden that note.
+unowned notes automatically join the signed-in account and enter its sync queue
+on login or when an existing session resumes, including notes previously kept
+on the device. Notes stay local while signed out. Uploads require connectivity
+and a server that advertises the `note` collection.
+Logout checks persisted data for pending uploads. When changes remain, it
+immediately shows sync progress and attempts to upload them without the normal
+delay. The whole attempt has a 15-second limit. Editors keep their normal
+autosave behavior; logout does not check or force-save unsaved body/title drafts.
+Successful sync automatically logs out; failed or timed-out sync offers Cancel
+or Discard changes and log out. Cancelling keeps the account open even if the
+background upload later finishes. With no pending changes, logout proceeds
+directly. Logout clears local notes, recovery data, sync metadata, vocabulary,
+snippets, dictation history, and counters, then restarts the app. Cloud copies,
+device settings, and downloaded models stay intact. Restart resets in-memory
+state; unsaved editor drafts, unfinished recording, and other work may be dropped.
+Expired credentials preserve the data and its owner for reauthentication; a
+different account requires explicit logout first. Work created after logout is
+local until the next sign-in.
 
 Create, body/title/icon edits, and deletion update the note and durable outbox in
 one transaction. Pushes use accepted server versions; wall-clock timestamps do
@@ -128,7 +141,7 @@ Startup clears existing note deadlines so pending changes can sync immediately;
 new edits receive the normal 10-second delay.
 An already-captured head can finish while later edits wait; uncaptured edits
 coalesce into the latest payload. Vocabulary and snippet edits retain their
-750 ms wake debounce. Local body/title saves remain at 250/500 ms.
+750 ms wake debounce. Local body and title saves both use a 250 ms debounce.
 
 Pull application and cursor advancement are atomic.
 Divergent pending edits become separate “(conflict copy)” notes before canonical

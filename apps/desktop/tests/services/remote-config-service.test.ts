@@ -11,12 +11,21 @@ import {
 } from "../../src/main/runtime/tags";
 import { setApplicationLocale } from "../../src/i18n/application-locale";
 import {
+  DESKTOP_AUTO_VOCABULARY_FLAG,
   DESKTOP_BACKGROUND_UPDATES_FLAG,
   RemoteConfigService,
 } from "../../src/services/remote-config-service";
-import type { AuthService } from "../../src/services/auth-service";
+import {
+  AuthServiceFailure,
+  type AuthService,
+} from "../../src/services/auth-service";
 import type { SettingsService } from "../../src/services/settings-service";
 import type { TelemetryService } from "../../src/services/telemetry-service";
+import { logger } from "../../src/main/logger";
+import {
+  DESKTOP_REFRESH_AUDIO_DEVICES_ON_START_FLAG,
+  DESKTOP_STEREO_MIC_DOWNMIX_FLAG,
+} from "../../src/types/audio-capture";
 
 describe("RemoteConfigService", () => {
   type PersistedRemoteConfig = Awaited<
@@ -60,7 +69,7 @@ describe("RemoteConfigService", () => {
           Layer.provide(Layer.succeed(TelemetryServiceTag, telemetryService)),
           Layer.provide(Layer.succeed(AppScopeTag, scope)),
         ),
-      ).pipe(Scope.extend(scope)),
+      ).pipe(Scope.provide(scope)),
     );
     closeScope = () => Effect.runPromise(Scope.close(scope, Exit.void));
 
@@ -180,6 +189,45 @@ describe("RemoteConfigService", () => {
     expect(fetch).toHaveBeenCalled();
   });
 
+  it("logs an auth failure and its finalizer defects without replacing cached config", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => cachedConfig()!.config,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { service, authService } = await createService(cachedConfig());
+    await service.refresh();
+    const config = service.getConfig();
+    const failure = new AuthServiceFailure({
+      message: "token unavailable",
+      cause: "offline",
+    });
+    const first = new Error("auth cleanup failed");
+    const second = new Error("auth finalizer failed");
+    vi.spyOn(authService, "getIdToken").mockReturnValue(
+      Effect.fail(failure).pipe(
+        Effect.ensuring(Effect.die(first)),
+        Effect.ensuring(Effect.die(second)),
+      ),
+    );
+    const logError = vi
+      .spyOn(logger.main, "error")
+      .mockImplementation(() => {});
+    fetchMock.mockClear();
+    try {
+      await service.refresh();
+      expect(service.getConfig()).toBe(config);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(logError.mock.calls).toEqual([
+        ["Failed to refresh remote config:", failure],
+        ["Failed to refresh remote config:", first],
+        ["Failed to refresh remote config:", second],
+      ]);
+    } finally {
+      logError.mockRestore();
+    }
+  });
+
   it("deduplicates refreshes and discards a response from before an identity change", async () => {
     const pending: Array<(value: unknown) => void> = [];
     const fetchMock = vi.fn(
@@ -256,9 +304,76 @@ describe("RemoteConfigService", () => {
       config: {
         version: 1,
         surfaces: [],
-        flags: { [DESKTOP_BACKGROUND_UPDATES_FLAG]: true },
+        flags: {
+          [DESKTOP_BACKGROUND_UPDATES_FLAG]: true,
+          [DESKTOP_AUTO_VOCABULARY_FLAG]: true,
+          [DESKTOP_STEREO_MIC_DOWNMIX_FLAG]: true,
+          [DESKTOP_REFRESH_AUDIO_DEVICES_ON_START_FLAG]: false,
+        },
       },
     });
+  });
+
+  it("keeps a cached stereo-downmix kill switch offline and accepts a refreshed value", async () => {
+    const cached = cachedConfig();
+    cached!.config!.flags = { [DESKTOP_STEREO_MIC_DOWNMIX_FLAG]: false };
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+    const { service } = await createService(cached);
+    await service.refresh();
+    expect(service.getConfig().flags[DESKTOP_STEREO_MIC_DOWNMIX_FLAG]).toBe(
+      false,
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          version: 1,
+          flags: { [DESKTOP_STEREO_MIC_DOWNMIX_FLAG]: true },
+        }),
+      }),
+    );
+    await service.refresh();
+    expect(service.getConfig().flags[DESKTOP_STEREO_MIC_DOWNMIX_FLAG]).toBe(
+      true,
+    );
+  });
+
+  it("defaults device refresh to false and accepts a remote override", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+    const { service } = await createService();
+    await service.refresh();
+    expect(
+      service.getConfig().flags[DESKTOP_REFRESH_AUDIO_DEVICES_ON_START_FLAG],
+    ).toBe(false);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          version: 1,
+          flags: { [DESKTOP_REFRESH_AUDIO_DEVICES_ON_START_FLAG]: true },
+        }),
+      }),
+    );
+    await service.refresh();
+    expect(
+      service.getConfig().flags[DESKTOP_REFRESH_AUDIO_DEVICES_ON_START_FLAG],
+    ).toBe(true);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ version: 1 }),
+      }),
+    );
+    await service.refresh();
+    expect(
+      service.getConfig().flags[DESKTOP_REFRESH_AUDIO_DEVICES_ON_START_FLAG],
+    ).toBe(false);
   });
 
   it("preserves an explicit false flag from the server", async () => {
@@ -382,6 +497,32 @@ describe("RemoteConfigService", () => {
     const ok = (payload: unknown) => ({
       ok: true,
       json: async () => payload,
+    });
+
+    it("contains a telemetry exception while reporting an invalid envelope", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(ok(cachedConfig()!.config));
+      vi.stubGlobal("fetch", fetchMock);
+      const { service, captureContractFailure } =
+        await createService(cachedConfig());
+      await service.refresh();
+      const config = service.getConfig();
+      const telemetryError = new Error("telemetry transport crashed");
+      captureContractFailure.mockImplementation(() => {
+        throw telemetryError;
+      });
+      fetchMock.mockResolvedValue(ok({ version: "invalid" }));
+      const logError = vi.spyOn(logger.main, "error");
+      try {
+        await expect(service.refresh()).resolves.toBeUndefined();
+        expect(service.getConfig()).toBe(config);
+        expect(logError).toHaveBeenCalledWith(
+          "Failed to refresh remote config:",
+          telemetryError,
+        );
+        expect(captureContractFailure).toHaveBeenCalledOnce();
+      } finally {
+        logError.mockRestore();
+      }
     });
 
     it("keeps the last good config and reports an invalid envelope once per episode", async () => {

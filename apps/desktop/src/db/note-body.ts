@@ -1,6 +1,8 @@
+import { activeUserIdentity } from "./settings-sync/active-state";
+import { getUserDataAccountId } from "./user-data";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { db } from "./index";
-import { notes, yjsUpdates } from "./schema";
+import { notes, yjsUpdates, syncItemState } from "./schema";
 import { convertLegacyNote } from "../notes/legacy";
 import {
   visibleNotesWhere,
@@ -9,7 +11,6 @@ import {
   preserveNoteConflict,
   findNoteSyncState,
 } from "./settings-sync/notes";
-import { findSidecar } from "./settings-sync/canonical";
 import type { NoteBody, NoteSaveResult, NoteSaveOrigin } from "../notes/types";
 
 function updatesFor(noteId: string) {
@@ -90,17 +91,13 @@ export function loadNoteBody(noteId: string): NoteBody {
       noteId,
       markdown: note.content ?? "",
       remoteVersion: syncState?.remoteVersion ?? null,
-      ...(note.accountId
-        ? {
-            origin: {
-              accountId: note.accountId,
-              title: note.title,
-              icon: note.icon,
-              createdAtMs: note.createdAt.getTime(),
-              markdown: note.content ?? "",
-            },
-          }
-        : {}),
+      origin: {
+        accountId: note.accountId,
+        title: note.title,
+        icon: note.icon,
+        createdAtMs: note.createdAt.getTime(),
+        markdown: note.content ?? "",
+      },
     };
   }
   return {
@@ -117,45 +114,60 @@ export function saveNoteBody(
   origin?: NoteSaveOrigin,
 ): NoteSaveResult {
   return db.transaction((tx) => {
-    const note = tx.select().from(notes).where(eq(notes.id, noteId)).get();
+    const note = tx
+      .select()
+      .from(notes)
+      .where(and(eq(notes.id, noteId), visibleNotesWhere()))
+      .get();
     if (!note) {
       // Only a newer accepted remote tombstone can recover a pending editor
       // draft. Local deletion and ordinary delayed saves never recreate notes.
-      if (origin && expectedRemoteVersion !== undefined) {
-        const fence = {
-          accountId: origin.accountId,
-          scopeId: origin.accountId,
-          scopeType: "user" as const,
-        };
-        const sidecar = findSidecar(tx, fence, "note", noteId);
+      const accountId =
+        activeUserIdentity()?.scopeId ?? getUserDataAccountId(tx);
+      if (
+        accountId &&
+        origin &&
+        (origin.accountId === null || origin.accountId === accountId) &&
+        expectedRemoteVersion !== undefined
+      ) {
+        const sidecar = tx
+          .select()
+          .from(syncItemState)
+          .where(
+            and(
+              eq(syncItemState.scopeType, "user"),
+              eq(syncItemState.collection, "note"),
+              eq(syncItemState.syncId, noteId),
+              eq(syncItemState.scopeId, accountId),
+            ),
+          )
+          .get();
         if (
           sidecar?.acceptedPayload === null &&
           sidecar.noteRemoteVersion !== null &&
           sidecar.noteRemoteVersion > (expectedRemoteVersion ?? 0)
         ) {
-          preserveNoteConflict(tx, fence, {
-            schemaVersion: 1,
-            title: origin.title,
-            icon: origin.icon,
-            body: { format: "markdown", content: markdown },
-            createdAtMs: origin.createdAtMs,
-            updatedAtMs: Date.now(),
-          });
+          preserveNoteConflict(
+            tx,
+            {
+              accountId: sidecar.scopeId,
+              scopeId: sidecar.scopeId,
+              scopeType: "user",
+            },
+            {
+              schemaVersion: 1,
+              title: origin.title,
+              icon: origin.icon,
+              body: { format: "markdown", content: markdown },
+              createdAtMs: origin.createdAtMs,
+              updatedAtMs: Date.now(),
+            },
+          );
           return { status: "saved", recovered: true };
         }
       }
       return { status: "deleted" };
     }
-    const fromOpenEditor = origin && note.accountId === origin.accountId;
-    if (
-      !fromOpenEditor &&
-      !tx
-        .select({ id: notes.id })
-        .from(notes)
-        .where(and(eq(notes.id, noteId), visibleNotesWhere()))
-        .get()
-    )
-      return { status: "deleted" };
     if (note.contentFormat !== "markdown-v1")
       throw new Error("This note needs recovery before editing");
     const remoteVersion = findNoteSyncState(tx, note)?.remoteVersion ?? null;

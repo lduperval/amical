@@ -2,7 +2,10 @@ import { Effect } from "effect";
 import { logger } from "../../logger";
 import { ErrorCodes } from "../../../types/error";
 import { codeOf, isDictationError, uiOf } from "../../../types/errors";
-import { reportDictationDefect } from "../../telemetry/dictation-trace";
+import {
+  reportDictationDefect,
+  tracePhase,
+} from "../../telemetry/dictation-trace";
 import type { ResolvedStreamingSession } from "../../../services/transcription-service";
 import { type SessionWork } from "../effect/session-work";
 import type { LifecycleFactSink, TranscriptionPort } from "../ports";
@@ -175,14 +178,16 @@ export function createTranscriptionAdapter(
           try: () => deps.service.resetVadForNewSession(),
           catch: (error) => error,
         }).pipe(
-          Effect.catchAll((error) =>
+          Effect.catch((error) =>
             Effect.sync(() =>
               logger.transcription.warn("VAD reset failed", { error }),
             ),
           ),
         ),
       );
-      void deps.service.warmupActiveProvider().catch((error) => {
+      void tracePhase(session, "transcription.provider-warmup", () =>
+        deps.service.warmupActiveProvider(),
+      ).catch((error) => {
         logger.transcription.warn("Provider warmup failed (non-fatal)", {
           error,
         });

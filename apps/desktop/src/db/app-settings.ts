@@ -25,7 +25,10 @@ import {
   type NewAppSettings,
   type AppSettingsData,
 } from "./schema";
-import { dictationLanguageForLocale } from "../constants/languages";
+import {
+  dictationLanguageForLocale,
+  oneCodePerLanguage,
+} from "../constants/languages";
 import { isLinux, isMacOS } from "../utils/platform";
 import { MAC_KEYCODES, WINDOWS_KEYCODES } from "../utils/keycodes";
 import { LINUX_DEFAULT_SHORTCUTS } from "../utils/linux-default-shortcuts";
@@ -87,14 +90,17 @@ const getDefaultShortcuts = () => {
 // New installs get concrete dictation languages rather than auto-detect —
 // accuracy is better with a language constraint, and the onboarding language
 // step lets users adjust. English plus the OS language, when whisper supports
-// it and it isn't English.
+// it and it isn't English; an English variant (e.g. en-GB) replaces English.
 const defaultDictationSettings = (): AppSettingsData["dictation"] => {
   try {
     const locale =
       app.getPreferredSystemLanguages()[0] ?? app.getSystemLocale();
     const system = locale ? dictationLanguageForLocale(locale) : undefined;
-    if (system && system !== "en") {
-      return { autoDetectEnabled: false, languages: ["en", system] };
+    if (system) {
+      return {
+        autoDetectEnabled: false,
+        languages: oneCodePerLanguage(["en", system]),
+      };
     }
   } catch {
     // Locale APIs unavailable (e.g. before app ready); English-only is fine.
@@ -119,6 +125,7 @@ const buildDefaultSettings = (): AppSettingsData => ({
     muteDictationSounds: false,
     autoDictateOnNewNote: false,
     preserveClipboard: true,
+    showWidgetOutline: false,
     allowInjectedKeys: false,
   },
   history: {
@@ -291,6 +298,27 @@ export async function updateSettingsSection<K extends keyof AppSettingsData>(
   return await updateAppSettings({
     [section]: newData,
   } as Partial<AppSettingsData>);
+}
+
+// Auth fencing and logout cleanup must execute after queued settings writes,
+// in the same transaction as the credential change.
+export async function updateAuthSettings(
+  auth: AppSettingsData["auth"],
+  isCurrent: () => boolean,
+  clearLocalData?: () => void,
+): Promise<boolean> {
+  return serialized(async () => {
+    const settings = await readOrInitSettingsLocked();
+    if (!isCurrent()) return false;
+    db.transaction((tx) => {
+      clearLocalData?.();
+      tx.update(appSettings)
+        .set({ data: { ...settings, auth }, updatedAt: new Date() })
+        .where(eq(appSettings.id, SETTINGS_ID))
+        .run();
+    });
+    return true;
+  });
 }
 
 // Reset settings to defaults

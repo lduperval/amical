@@ -11,9 +11,10 @@ import {
   Option,
   Ref,
   Scope,
+  Semaphore,
 } from "effect";
 
-import { getSettingsSection, updateSettingsSection } from "../db/app-settings";
+import { getSettingsSection, updateAuthSettings } from "../db/app-settings";
 import { logger } from "../main/logger";
 import { down, up } from "../main/runtime/layer-helpers";
 import { AppScopeTag, AuthServiceTag } from "../main/runtime/tags";
@@ -93,7 +94,7 @@ export async function runAuthEffect<A>(
   const exit = await Effect.runPromiseExit(effect);
   if (Exit.isSuccess(exit)) return exit.value;
 
-  const failure = Cause.failureOption(exit.cause);
+  const failure = Cause.findErrorOption(exit.cause);
   if (Option.isSome(failure)) {
     throw originalAuthError(failure.value);
   }
@@ -155,9 +156,9 @@ export class AuthService extends EventEmitter {
   >();
 
   private constructor(
-    private readonly authScope: Scope.CloseableScope,
-    private readonly authStateSemaphore: Effect.Semaphore,
-    private readonly refreshAdmissionSemaphore: Effect.Semaphore,
+    private readonly authScope: Scope.Closeable,
+    private readonly authStateSemaphore: Semaphore.Semaphore,
+    private readonly refreshAdmissionSemaphore: Semaphore.Semaphore,
     private readonly refreshRun: Ref.Ref<RefreshRun | null>,
   ) {
     super();
@@ -191,8 +192,8 @@ export class AuthService extends EventEmitter {
   private static make(): Effect.Effect<AuthService> {
     return Effect.gen(function* () {
       const authScope = yield* Scope.make();
-      const authStateSemaphore = yield* Effect.makeSemaphore(1);
-      const refreshAdmissionSemaphore = yield* Effect.makeSemaphore(1);
+      const authStateSemaphore = yield* Semaphore.make(1);
+      const refreshAdmissionSemaphore = yield* Semaphore.make(1);
       const refreshRun = yield* Ref.make<RefreshRun | null>(null);
       return new AuthService(
         authScope,
@@ -218,7 +219,7 @@ export class AuthService extends EventEmitter {
         const authService = yield* AuthService.make();
         yield* Scope.addFinalizer(
           appScope,
-          authService.shutdown().pipe(Effect.zipLeft(down("authService"))),
+          authService.shutdown().pipe(Effect.tap(down("authService"))),
         );
         logger.main.info("Auth service initialized");
         up("authService");
@@ -282,7 +283,7 @@ export class AuthService extends EventEmitter {
     fallbackRefreshToken?: string,
     fallbackIdToken?: string,
   ): Effect.Effect<TokenResponse, AuthServiceFailure> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const statusProperties =
         typeof response.status === "number" ? { status: response.status } : {};
       const raw = yield* Effect.tryPromise({
@@ -327,7 +328,7 @@ export class AuthService extends EventEmitter {
 
   /** Start the OAuth login flow. */
   login(): Effect.Effect<void, AuthServiceFailure> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       yield* this.advanceGenerationAndAbortRefresh();
       const authUrl = yield* Effect.try({
         try: () => {
@@ -376,7 +377,7 @@ export class AuthService extends EventEmitter {
     code: string,
     state: string | null,
   ): Effect.Effect<void, AuthServiceFailure> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       logger.main.info("Handling auth callback");
       const pendingAuth = this.pendingAuth;
       const callbackGeneration = this.authGeneration;
@@ -402,6 +403,7 @@ export class AuthService extends EventEmitter {
         code,
         pendingAuth.codeVerifier,
       );
+      const previous = yield* this.getAuthState();
       if (
         callbackGeneration !== this.authGeneration ||
         this.pendingAuth !== pendingAuth
@@ -432,6 +434,20 @@ export class AuthService extends EventEmitter {
         }
       }
 
+      if (
+        previous?.userInfo?.sub &&
+        previous.userInfo.sub !== authState.userInfo?.sub
+      ) {
+        return yield* Effect.fail(
+          authFailure(
+            new Error(
+              `Please sign in with ${previous.userInfo.email || "your existing account"}, or log out first to switch accounts.`,
+            ),
+            "Account change requires logout",
+          ),
+        );
+      }
+
       const loginGeneration = yield* this.advanceGenerationAndAbortRefresh();
       const persisted = yield* this.writeAuthState(loginGeneration, authState);
       if (!persisted) return;
@@ -456,7 +472,7 @@ export class AuthService extends EventEmitter {
     code: string,
     codeVerifier: string,
   ): Effect.Effect<TokenResponse, AuthServiceFailure> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       logger.main.info(
         "Exchanging code for token at:",
         this.config.tokenEndpoint,
@@ -518,21 +534,55 @@ export class AuthService extends EventEmitter {
   }
 
   /** Logout and clear auth state. */
-  logout(): Effect.Effect<void, AuthServiceFailure> {
-    return Effect.gen(this, function* () {
+  logout(
+    preserveAccount = false,
+    clearLocalData?: () => void,
+  ): Effect.Effect<void, AuthServiceFailure> {
+    return Effect.gen({ self: this }, function* () {
       const logoutGeneration = yield* this.advanceGenerationAndAbortRefresh();
       this.pendingAuth = null;
+      const previous = preserveAccount ? yield* this.getAuthState() : null;
 
       for (const handler of this.beforeLogoutHandlers) {
         yield* handler().pipe(
-          Effect.mapError((cause) =>
-            authFailure(cause, "Before-logout handler failed"),
+          Effect.catchCause((cause) =>
+            Effect.failCause(
+              Cause.map(cause, (cause) =>
+                authFailure(cause, "Before-logout handler failed"),
+              ),
+            ),
           ),
         );
       }
 
-      const cleared = yield* this.writeAuthState(logoutGeneration, undefined);
-      if (!cleared) return;
+      // Expired credentials must not turn account data into another user's
+      // guest data. Keep the owner until explicit logout clears local data.
+      const cleared = yield* this.writeAuthState(
+        logoutGeneration,
+        previous
+          ? {
+              ...previous,
+              isAuthenticated: false,
+              idToken: null,
+              accessToken: null,
+              refreshToken: null,
+              expiresAt: null,
+            }
+          : undefined,
+        undefined,
+        undefined,
+        clearLocalData,
+      );
+      if (!cleared) {
+        return yield* Effect.fail(
+          authFailure(
+            new Error(
+              "Authentication changed during logout. Please try again.",
+            ),
+            "Logout interrupted",
+          ),
+        );
+      }
 
       this.emit("logged-out");
       logger.main.info("User logged out");
@@ -542,7 +592,7 @@ export class AuthService extends EventEmitter {
   /** Check if the user is authenticated, refreshing near-expiry tokens. */
   isAuthenticated(): Effect.Effect<boolean, AuthServiceFailure> {
     return this.refreshTokenIfNeeded().pipe(
-      Effect.zipRight(this.getAuthState()),
+      Effect.andThen(this.getAuthState()),
       Effect.map((authState) => Boolean(authState?.isAuthenticated)),
     );
   }
@@ -558,7 +608,7 @@ export class AuthService extends EventEmitter {
   /** Get the ID token, refreshing near-expiry tokens first. */
   getIdToken(): Effect.Effect<string | null, AuthServiceFailure> {
     return this.refreshTokenIfNeeded().pipe(
-      Effect.zipRight(this.getAuthState()),
+      Effect.andThen(this.getAuthState()),
       Effect.map((authState) => authState?.idToken || null),
     );
   }
@@ -568,7 +618,7 @@ export class AuthService extends EventEmitter {
    * values are rejected server-side.
    */
   openWebSession(returnPath: string): Effect.Effect<void, AuthServiceFailure> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const idToken = yield* this.getIdToken();
       if (!idToken) {
         return yield* Effect.fail(
@@ -701,9 +751,9 @@ export class AuthService extends EventEmitter {
   /** Refresh the token if needed. All callers share one auth-scoped runner. */
   refreshTokenIfNeeded(force = false): Effect.Effect<void> {
     return Effect.uninterruptibleMask((restore) =>
-      Effect.gen(this, function* () {
+      Effect.gen({ self: this }, function* () {
         const admission = yield* this.refreshAdmissionSemaphore.withPermits(1)(
-          Effect.gen(this, function* () {
+          Effect.gen({ self: this }, function* () {
             const current = yield* Ref.get(this.refreshRun);
             if (current) {
               if (force) yield* Ref.set(current.forceRequested, true);
@@ -721,14 +771,29 @@ export class AuthService extends EventEmitter {
               this.authGeneration,
               run,
             ).pipe(
-              Effect.catchAll((error) =>
-                Effect.sync(() =>
-                  logger.main.error(
-                    "Token refresh failed:",
-                    originalAuthError(error),
+              Effect.catchCause((cause) => {
+                const failure = Cause.findErrorOption(cause);
+                // Refresh handles auth failures; cleanup defects and cancellation
+                // still complete every waiter with a failed exit.
+                const unhandled = Cause.fromReasons<never>(
+                  cause.reasons.filter((reason) => !Cause.isFailReason(reason)),
+                );
+                return Effect.sync(() => {
+                  if (Option.isSome(failure)) {
+                    logger.main.error(
+                      "Token refresh failed:",
+                      originalAuthError(failure.value),
+                    );
+                  }
+                }).pipe(
+                  Effect.andThen(
+                    unhandled.reasons.length > 0
+                      ? Effect.failCause(unhandled)
+                      : Effect.void,
                   ),
-                ),
-              ),
+                );
+              }),
+              Effect.interruptible,
               Effect.onInterrupt(() =>
                 Effect.sync(() => run.controller.abort()),
               ),
@@ -736,11 +801,16 @@ export class AuthService extends EventEmitter {
                 Effect.uninterruptible(
                   Ref.update(this.refreshRun, (active) =>
                     active === run ? null : active,
-                  ).pipe(Effect.zipRight(Deferred.done(run.completion, exit))),
+                  ).pipe(Effect.andThen(Deferred.done(run.completion, exit))),
                 ),
               ),
             );
-            yield* Effect.forkIn(Effect.interruptible(runner), this.authScope);
+            // Install both exit handlers before honoring cancellation, even if
+            // shutdown happens before the worker's first scheduled turn.
+            // The refresh work itself remains interruptible.
+            yield* Effect.forkIn(runner, this.authScope, {
+              uninterruptible: true,
+            });
             return { run, existing: false } as const;
           }),
         );
@@ -757,19 +827,19 @@ export class AuthService extends EventEmitter {
     generation: number,
     run: RefreshRun,
   ): Effect.Effect<void, AuthServiceFailure> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const { controller } = run;
       const authState = yield* this.getAuthState();
       if (
         controller.signal.aborted ||
         generation !== this.authGeneration ||
-        !authState
+        !authState?.isAuthenticated
       ) {
         return;
       }
 
       if (!authState.refreshToken) {
-        yield* this.logout();
+        yield* this.logout(true);
         return;
       }
 
@@ -780,7 +850,7 @@ export class AuthService extends EventEmitter {
         const shouldForce = yield* this.refreshAdmissionSemaphore.withPermits(
           1,
         )(
-          Effect.gen(this, function* () {
+          Effect.gen({ self: this }, function* () {
             if (yield* Ref.get(run.forceRequested)) return true;
 
             yield* Ref.update(this.refreshRun, (active) =>
@@ -808,7 +878,7 @@ export class AuthService extends EventEmitter {
     generation: number,
     controller: AbortController,
   ): Effect.Effect<void, AuthServiceFailure> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       logger.main.info("Refreshing access token");
       const body = {
         grant_type: "refresh_token",
@@ -855,7 +925,7 @@ export class AuthService extends EventEmitter {
 
         if (response.status === 400 || response.status === 401) {
           logger.main.info("Refresh token invalid or expired, logging out");
-          yield* this.logout();
+          yield* this.logout(true);
           const expired = new Error("Refresh token expired");
           this.emit("token-refresh-failed", expired);
           return yield* Effect.fail(
@@ -947,7 +1017,13 @@ export class AuthService extends EventEmitter {
         expiresAt: new Date(updatedAuthState.expiresAt!).toISOString(),
       });
     }).pipe(
-      Effect.catchAll((error) => {
+      Effect.catchCause((cause) => {
+        if (!cause.reasons.every(Cause.isFailReason)) {
+          return Effect.failCause(cause);
+        }
+        const failure = Cause.findErrorOption(cause);
+        if (Option.isNone(failure)) return Effect.failCause(cause);
+        const error = failure.value;
         if (controller.signal.aborted || generation !== this.authGeneration) {
           return Effect.void;
         }
@@ -955,7 +1031,7 @@ export class AuthService extends EventEmitter {
           const original = originalAuthError(error);
           logger.main.error("Error refreshing token:", original);
           this.emit("token-refresh-failed", original);
-        }).pipe(Effect.zipRight(Effect.fail(error)));
+        }).pipe(Effect.andThen(Effect.failCause(cause)));
       }),
     );
   }
@@ -965,19 +1041,24 @@ export class AuthService extends EventEmitter {
     authState: AuthState | undefined,
     expectedRefreshToken?: string,
     signal?: AbortSignal,
+    clearLocalData?: () => void,
   ): Effect.Effect<boolean, AuthServiceFailure> {
-    const write = Effect.gen(this, function* () {
+    const write = Effect.gen({ self: this }, function* () {
       if (signal?.aborted || generation !== this.authGeneration) return false;
       if (expectedRefreshToken !== undefined) {
         const latest = yield* this.getAuthState();
         if (latest?.refreshToken !== expectedRefreshToken) return false;
       }
-      yield* Effect.tryPromise({
-        try: () => updateSettingsSection("auth", authState),
+      return yield* Effect.tryPromise({
+        try: () =>
+          updateAuthSettings(
+            authState,
+            () => !signal?.aborted && generation === this.authGeneration,
+            clearLocalData,
+          ),
         catch: (cause) =>
           authFailure(cause, "Unable to update authentication state"),
       });
-      return !signal?.aborted && generation === this.authGeneration;
     });
     return this.authStateSemaphore.withPermits(1)(
       Effect.uninterruptible(write),
@@ -986,7 +1067,7 @@ export class AuthService extends EventEmitter {
 
   private advanceGenerationAndAbortRefresh(): Effect.Effect<number> {
     return Effect.uninterruptible(
-      Effect.gen(this, function* () {
+      Effect.gen({ self: this }, function* () {
         const generation = ++this.authGeneration;
         const current = yield* Ref.get(this.refreshRun);
         current?.controller.abort();

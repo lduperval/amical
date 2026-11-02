@@ -1,6 +1,8 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, type RefObject } from "react";
 import { useAudioCapture } from "./useAudioCapture";
 import type { AcquiredMicrophoneMetadata } from "./audioCaptureDevice";
+import type { AudioCaptureInfo } from "@/types/audio-capture";
+import type { CaptureTimingsBatch } from "@/types/capture-timings";
 import { api } from "@/trpc/react";
 import type {
   CaptureFailure,
@@ -20,8 +22,8 @@ export interface RecordingStatus {
 
 export interface UseRecordingOutput {
   recordingStatus: RecordingStatus;
-  /** Per-bar levels (0..1): scrolling history of mic loudness for the bars. */
-  audioLevels: number[];
+  /** Latest voice level (0..1), updated per audio frame without re-rendering. */
+  audioLevelRef: RefObject<number>;
   startRecording: () => Promise<void>;
   stopRecording: () => Promise<void>;
   dismissRecording: () => Promise<void>;
@@ -42,6 +44,7 @@ export const useRecording = (): UseRecordingOutput => {
   const dismissRecordingMutation = api.recording.dismiss.useMutation();
   const captureStartedMutation = api.recording.captureStarted.useMutation();
   const captureFailedMutation = api.recording.captureFailed.useMutation();
+  const captureTimingsMutation = api.recording.captureTimings.useMutation();
 
   // Subscribe to recording state updates via tRPC
   api.recording.stateUpdates.useSubscription(undefined, {
@@ -60,6 +63,7 @@ export const useRecording = (): UseRecordingOutput => {
       arrayBuffer: ArrayBuffer,
       speechProbability: number,
       isFinalChunk: boolean,
+      captureInfo?: AudioCaptureInfo,
     ) => {
       // Convert ArrayBuffer to Float32Array
       const float32Array = new Float32Array(arrayBuffer);
@@ -70,6 +74,7 @@ export const useRecording = (): UseRecordingOutput => {
         sessionId,
         float32Array,
         isFinalChunk,
+        captureInfo,
       );
       console.debug(`Sent audio frame`, {
         samples: float32Array.length,
@@ -85,12 +90,17 @@ export const useRecording = (): UseRecordingOutput => {
   );
 
   const handleCaptureStarted = useCallback(
-    (microphone: AcquiredMicrophoneMetadata, sessionId: string) => {
+    (
+      microphone: AcquiredMicrophoneMetadata,
+      sessionId: string,
+      timings?: CaptureTimingsBatch,
+    ) => {
       captureStartedMutation.mutate(
         {
           sessionId,
           microphoneName: microphone.name,
           captureSource: microphone.captureSource,
+          ...(timings && { timings }),
         },
         {
           onError: (error) => {
@@ -103,14 +113,30 @@ export const useRecording = (): UseRecordingOutput => {
   );
 
   const handleCaptureFailure = useCallback(
-    (failure: CaptureFailure) => {
-      captureFailedMutation.mutate(failure, {
-        onError: (error) => {
-          console.warn("Failed to report microphone capture failure", error);
+    (failure: CaptureFailure, timings?: CaptureTimingsBatch) => {
+      captureFailedMutation.mutate(
+        { ...failure, ...(timings && { timings }) },
+        {
+          onError: (error) => {
+            console.warn("Failed to report microphone capture failure", error);
+          },
         },
-      });
+      );
     },
     [captureFailedMutation],
+  );
+
+  const handleCaptureTimings = useCallback(
+    (sessionId: string, timings: CaptureTimingsBatch, complete: boolean) => {
+      captureTimingsMutation.mutate(
+        { sessionId, timings, complete },
+        {
+          onError: (error) =>
+            console.warn("Failed to report capture timings", error),
+        },
+      );
+    },
+    [captureTimingsMutation],
   );
 
   // Capture spins up at "starting" and confirms via captureStarted —
@@ -120,10 +146,11 @@ export const useRecording = (): UseRecordingOutput => {
     recordingStatus.state === "recording";
   const isIdle = recordingStatus.state === "idle";
 
-  const { audioLevels } = useAudioCapture({
+  const { audioLevelRef } = useAudioCapture({
     onAudioChunk: handleAudioChunk,
     onCaptureStarted: handleCaptureStarted,
     onCaptureFailure: handleCaptureFailure,
+    onCaptureTimings: handleCaptureTimings,
     sessionId: recordingStatus.sessionId,
     enabled: isActive,
     idle: isIdle,
@@ -153,7 +180,7 @@ export const useRecording = (): UseRecordingOutput => {
 
   return {
     recordingStatus,
-    audioLevels,
+    audioLevelRef,
     startRecording,
     stopRecording,
     dismissRecording,

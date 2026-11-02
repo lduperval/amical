@@ -1,10 +1,11 @@
 import { EventEmitter } from "node:events";
 import { BrowserWindow } from "electron";
-import { Effect, Fiber } from "effect";
+import { Context, Effect, Fiber, Scheduler } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AuthState, AuthService } from "../../src/services/auth-service";
 import { SettingsSyncService } from "../../src/services/settings-sync-service";
+import { logger } from "../../src/main/logger";
 import {
   type SyncBootstrap,
   type SyncPullPage,
@@ -12,6 +13,7 @@ import {
 } from "../../src/services/settings-sync-client";
 import {
   SettingsSyncDependencyFailure,
+  SettingsSyncFlushFailed,
   type SettingsSyncClientError,
 } from "../../src/services/settings-sync-errors";
 import {
@@ -96,9 +98,17 @@ class FakeAuthService extends EventEmitter {
     };
   }
 
-  async logoutForTest(): Promise<void> {
+  async expireForTest(): Promise<void> {
     if (this.beforeLogout) await Effect.runPromise(this.beforeLogout());
-    this.state = null;
+    if (this.state)
+      this.state = {
+        ...this.state,
+        isAuthenticated: false,
+        idToken: null,
+        accessToken: null,
+        refreshToken: null,
+        expiresAt: null,
+      };
     this.emit("logged-out");
   }
 }
@@ -183,6 +193,22 @@ class InMemorySyncClient {
   private readonly items = new Map<string, CanonicalSyncItem>();
 }
 
+// Let deferred work arm its timers through microtasks before advancing time.
+function useFakeEffectTimers() {
+  vi.useFakeTimers({
+    toFake: [
+      "Date",
+      "setTimeout",
+      "clearTimeout",
+      "setInterval",
+      "clearInterval",
+    ],
+  });
+  return Effect.runPromiseWith(
+    Context.make(Scheduler.Scheduler, new Scheduler.MixedScheduler("sync")),
+  );
+}
+
 describe("SettingsSyncService", () => {
   let testDb: TestDatabase;
   let service: SettingsSyncService | null;
@@ -204,7 +230,225 @@ describe("SettingsSyncService", () => {
     vi.restoreAllMocks();
   });
 
-  it("syncs notes in bounded batches, filters organization requests, and resumes after logout", async () => {
+  it("flushes delayed edits across scopes after the current request and token refresh", async () => {
+    const run = useFakeEffectTimers();
+    const client = new InMemorySyncClient(["vocabulary", "snippet", "note"]);
+    const bootstrap: SyncBootstrap = {
+      scopes: [
+        ...USER_BOOTSTRAP_SCOPES,
+        organizationBootstrapScope("org-1", true),
+      ],
+      collections: ["vocabulary", "snippet", "note"],
+      maxPushBatch: 100,
+      maxPushBytes: 524288,
+      pullLimit: 200,
+    };
+    let releasePull!: () => void;
+    client.bootstrap.mockImplementation(() =>
+      Effect.suspend(() => {
+        if (client.bootstrap.mock.calls.length === 2)
+          return Effect.fail(
+            new AuthenticationRequired({ message: "Expired token" }),
+          );
+        if (client.bootstrap.mock.calls.length > 1)
+          auth.emit("token-refreshed", AUTH_STATE);
+        return Effect.succeed(bootstrap);
+      }),
+    );
+    client.pull.mockImplementationOnce(() =>
+      Effect.callback<SyncPullPage>((resume) => {
+        releasePull = () => resume(Effect.succeed({ collections: [] }));
+      }),
+    );
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await run(service.initialize());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+    const note = await createNote({ title: "Before logout" });
+    saveNoteBody(note.id, "Last edit");
+    const word = await createVocabularyWord({ word: "Personal" });
+    const organizationWord = await createOrganizationVocabularyWord({
+      word: "Organization",
+    });
+
+    const flush = run(service.flush());
+    await vi.advanceTimersByTimeAsync(1);
+    expect(client.bootstrap).toHaveBeenCalledOnce();
+    releasePull();
+    await flush;
+
+    expect(client.push.mock.calls.flatMap(([mutations]) => mutations)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ syncId: note.id, collection: "note" }),
+        expect.objectContaining({ syncId: word.id, scopeId: "user-1" }),
+        expect.objectContaining({
+          syncId: organizationWord.id,
+          scopeId: "org-1",
+        }),
+      ]),
+    );
+    expect(testDb.db.select().from(syncOutbox).all()).toEqual([]);
+    expect(auth.state).toBe(AUTH_STATE);
+    expect(auth.refreshTokenIfNeeded).toHaveBeenCalledWith(true);
+  });
+
+  it.each(["offline", "timeout"] as const)(
+    "keeps pending changes when final sync fails: %s",
+    async (failure) => {
+      const run = useFakeEffectTimers();
+      const client = new InMemorySyncClient(["vocabulary", "snippet", "note"]);
+      service = SettingsSyncService.createForTests(
+        auth as unknown as AuthService,
+        client,
+      );
+      await run(service.initialize());
+      await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+      const note = await createNote({ title: "Keep my draft" });
+      client.push.mockReturnValue(
+        failure === "offline"
+          ? Effect.fail(
+              new CloudNetworkFailure({ message: "Offline", cause: null }),
+            )
+          : Effect.never,
+      );
+
+      const flush = run(Effect.exit(service.flush()));
+      await vi.waitFor(() => expect(client.push).toHaveBeenCalledOnce());
+      if (failure === "timeout") await vi.advanceTimersByTimeAsync(15_000);
+      const exit = await flush;
+
+      expect(() => settleExit(exit)).toThrow(SettingsSyncFlushFailed);
+      expect(testDb.db.select().from(syncOutbox).get()?.syncId).toBe(note.id);
+      expect(testDb.db.select().from(notes).get()?.id).toBe(note.id);
+      expect(auth.state).toBe(AUTH_STATE);
+    },
+  );
+
+  it("flushes conflict copies created during the final upload even after their delay expires", async () => {
+    const run = useFakeEffectTimers();
+    const client = new InMemorySyncClient(["note"]);
+    service = SettingsSyncService.createForTests(
+      auth as unknown as AuthService,
+      client,
+    );
+    await run(service.initialize());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+    const note = await createNote({ title: "My draft" });
+    saveNoteBody(note.id, "Unsynced body");
+    client.push.mockImplementationOnce(() =>
+      Effect.succeed([
+        {
+          status: "conflict",
+          reason: "version_conflict",
+          syncId: note.id,
+          canonical: {
+            collection: "note",
+            syncId: note.id,
+            syncVersion: 1,
+            payload: null,
+          },
+        },
+      ]),
+    );
+    client.pull.mockImplementationOnce(() =>
+      Effect.sleep(12_000).pipe(Effect.as({ collections: [] })),
+    );
+
+    const flush = run(service.flush());
+    await vi.waitFor(() => expect(client.pull).toHaveBeenCalledTimes(2));
+    await vi.advanceTimersByTimeAsync(12_000);
+    await flush;
+
+    expect(client.push).toHaveBeenCalledTimes(2);
+    expect(client.push.mock.calls[1][0]).toMatchObject([
+      {
+        collection: "note",
+        payload: {
+          title: "My draft (conflict copy)",
+          body: { content: "Unsynced body" },
+        },
+      },
+    ]);
+    expect(testDb.db.select().from(syncOutbox).all()).toEqual([]);
+  });
+
+  it.each(["blocked", "unsupported"] as const)(
+    "finishes flushing without retrying %s notes",
+    async (reason) => {
+      const run = useFakeEffectTimers();
+      const client = new InMemorySyncClient(
+        reason === "unsupported" ? [] : ["note"],
+      );
+      service = SettingsSyncService.createForTests(
+        auth as unknown as AuthService,
+        client,
+      );
+      await run(service.initialize());
+      await vi.waitFor(() => expect(client.bootstrap).toHaveBeenCalledOnce());
+      const note = await createNote({ title: "Keep locally" });
+      if (reason === "blocked")
+        testDb.db.update(syncOutbox).set({ blockedReason: "too large" }).run();
+
+      await run(service.flush());
+
+      expect(client.bootstrap).toHaveBeenCalledTimes(2);
+      expect(client.push).not.toHaveBeenCalled();
+      expect(testDb.db.select().from(syncOutbox).get()?.syncId).toBe(note.id);
+    },
+  );
+
+  it.each(["login", "startup", "resume"] as const)(
+    "adopts and uploads signed-out notes on %s",
+    async (activation) => {
+      const run = useFakeEffectTimers();
+      const local = await createNote({ title: "Signed-out note" });
+      saveNoteBody(local.id, "# Saved before login\n");
+      if (activation === "login") auth.state = null;
+      if (activation === "resume") {
+        await beginUserSyncSession("user-1");
+        pauseSyncSession();
+      }
+      const client = new InMemorySyncClient(["vocabulary", "snippet", "note"]);
+      service = SettingsSyncService.createForTests(
+        auth as unknown as AuthService,
+        client,
+      );
+
+      await run(service.initialize());
+      if (activation === "login") {
+        expect(testDb.db.select().from(notes).get()?.accountId).toBeNull();
+        expect(testDb.db.select().from(syncOutbox).all()).toEqual([]);
+        auth.state = AUTH_STATE;
+        auth.emit("authenticated", AUTH_STATE);
+      }
+      await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
+      expect(testDb.db.select().from(notes).get()).toMatchObject({
+        id: local.id,
+        accountId: "user-1",
+        content: "# Saved before login\n",
+      });
+      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.waitFor(() => expect(client.push).toHaveBeenCalledOnce());
+
+      expect(client.push.mock.calls[0][0]).toMatchObject([
+        {
+          collection: "note",
+          scopeId: "user-1",
+          syncId: local.id,
+          expectedSyncVersion: null,
+          payload: {
+            title: "Signed-out note",
+            body: { content: "# Saved before login\n" },
+          },
+        },
+      ]);
+      expect(testDb.db.select().from(syncOutbox).all()).toEqual([]);
+    },
+  );
+
+  it("syncs notes in bounded batches, filters organization requests, and retains them after authentication expires", async () => {
     await beginUserSyncSession("user-1");
     for (let index = 0; index < 7; index++)
       await createNote({ title: `Note ${index}` });
@@ -242,12 +486,12 @@ describe("SettingsSyncService", () => {
     expect(testDb.db.select().from(syncOutbox).all()).toMatchObject([
       { syncId: oversized.id, blockedReason: expect.any(String) },
     ]);
-    await auth.logoutForTest();
+    await auth.expireForTest();
     expect(testDb.db.select().from(notes).all()).toHaveLength(8);
     expect(testDb.db.select().from(syncOutbox).all()).toHaveLength(1);
   });
 
-  it("clears stale sync metadata when startup is signed out", async () => {
+  it("preserves sync metadata when startup is signed out", async () => {
     auth.state = null;
     await testDb.db
       .insert(syncClientState)
@@ -269,12 +513,12 @@ describe("SettingsSyncService", () => {
     );
     await Effect.runPromise(service.initialize());
 
-    expect(await testDb.db.select().from(syncClientState)).toEqual([]);
-    expect(
-      (await testDb.db.select().from(syncCollectionState)).filter(
-        (row) => row.collection !== "note",
-      ),
-    ).toEqual([]);
+    expect(await testDb.db.select().from(syncClientState)).toEqual([
+      { id: 1, lastOutboxSequence: 4 },
+    ]);
+    expect(await testDb.db.select().from(syncCollectionState)).toEqual([
+      expect.objectContaining({ scopeId: "stale-user", cursor: 3 }),
+    ]);
   });
 
   it("classifies startup authentication dependency failures", async () => {
@@ -380,7 +624,7 @@ describe("SettingsSyncService", () => {
     const client = new InMemorySyncClient();
     let releaseBootstrap!: (value: SyncBootstrap) => void;
     client.bootstrap.mockImplementationOnce(() =>
-      Effect.async<SyncBootstrap>((resume) => {
+      Effect.callback<SyncBootstrap>((resume) => {
         releaseBootstrap = (value) => resume(Effect.succeed(value));
       }),
     );
@@ -454,7 +698,7 @@ describe("SettingsSyncService", () => {
     let releaseInitialAuth!: (state: AuthState | null) => void;
     auth.getAuthState
       .mockImplementationOnce(() =>
-        Effect.async<AuthState | null>((resume) => {
+        Effect.callback<AuthState | null>((resume) => {
           releaseInitialAuth = (state) => resume(Effect.succeed(state));
         }),
       )
@@ -538,7 +782,7 @@ describe("SettingsSyncService", () => {
     let releaseShutdown!: () => void;
     vi.spyOn(internal.supervisor, "handleShutdownEvent").mockImplementationOnce(
       (...args) =>
-        Effect.async<void>((resume) => {
+        Effect.callback<void>((resume) => {
           shutdownStarted = true;
           releaseShutdown = () => resume(originalHandleShutdown(...args));
         }),
@@ -583,7 +827,7 @@ describe("SettingsSyncService", () => {
     auth.getAuthState
       .mockReturnValueOnce(Effect.succeed(AUTH_STATE))
       .mockImplementationOnce(() =>
-        Effect.async<AuthState | null>((resume) => {
+        Effect.callback<AuthState | null>((resume) => {
           releaseRestartAuth = (state) => resume(Effect.succeed(state));
         }),
       );
@@ -618,6 +862,8 @@ describe("SettingsSyncService", () => {
     await createVocabularyWord({
       word: "Pending",
     });
+    const local = await createNote({ title: "Adopted while offline" });
+    saveNoteBody(local.id, "Pending offline note");
     const unavailableClient = {
       bootstrap: vi.fn(() =>
         Effect.fail(
@@ -638,12 +884,21 @@ describe("SettingsSyncService", () => {
     await vi.waitFor(() =>
       expect(unavailableClient.bootstrap).toHaveBeenCalledOnce(),
     );
-    expect(await testDb.db.select().from(syncOutbox)).toHaveLength(1);
+    expect(await testDb.db.select().from(syncOutbox)).toHaveLength(2);
+    expect(testDb.db.select().from(notes).get()).toMatchObject({
+      id: local.id,
+      accountId: "user-1",
+      content: "Pending offline note",
+    });
 
     await Effect.runPromise(service.shutdown());
     service = null;
 
-    const resumedClient = new InMemorySyncClient();
+    const resumedClient = new InMemorySyncClient([
+      "vocabulary",
+      "snippet",
+      "note",
+    ]);
     service = SettingsSyncService.createForTests(
       auth as unknown as AuthService,
       resumedClient,
@@ -654,13 +909,26 @@ describe("SettingsSyncService", () => {
       expect(resumedClient.pull).toHaveBeenCalledOnce();
     });
 
-    expect(resumedClient.push.mock.calls[0][0][0]).toMatchObject({
-      expectedSyncVersion: null,
-      payload: { word: "Pending", replacement: null },
-    });
+    expect(resumedClient.push.mock.calls[0][0]).toMatchObject([
+      {
+        expectedSyncVersion: null,
+        payload: { word: "Pending", replacement: null },
+      },
+      {
+        collection: "note",
+        syncId: local.id,
+        expectedSyncVersion: null,
+        payload: {
+          title: "Adopted while offline",
+          body: { content: "Pending offline note" },
+        },
+      },
+    ]);
+    expect(await testDb.db.select().from(syncOutbox)).toEqual([]);
     expect(resumedClient.pull.mock.calls[0][2]).toEqual([
       { collection: "vocabulary", cursor: 0 },
       { collection: "snippet", cursor: 0 },
+      { collection: "note", cursor: 0 },
     ]);
   });
 
@@ -715,7 +983,7 @@ describe("SettingsSyncService", () => {
     ]);
   });
 
-  it("resets an existing cursor for an explicit login", async () => {
+  it("resumes existing cursors when signing back in", async () => {
     auth.state = null;
     await testDb.db.insert(syncCollectionState).values([
       {
@@ -743,8 +1011,8 @@ describe("SettingsSyncService", () => {
     await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
 
     expect(client.pull.mock.calls[0][2]).toEqual([
-      { collection: "vocabulary", cursor: 0 },
-      { collection: "snippet", cursor: 0 },
+      { collection: "vocabulary", cursor: 7 },
+      { collection: "snippet", cursor: 5 },
     ]);
   });
 
@@ -984,7 +1252,7 @@ describe("SettingsSyncService", () => {
     const client = {
       bootstrap: vi.fn(() => {
         if (client.bootstrap.mock.calls.length === 1) {
-          return Effect.async<SyncBootstrap, AuthenticationRequired>(
+          return Effect.callback<SyncBootstrap, AuthenticationRequired>(
             (resume) => {
               firstBootstrap.reject = (error) => resume(Effect.fail(error));
               return Effect.sync(() => {
@@ -1045,12 +1313,16 @@ describe("SettingsSyncService", () => {
   });
 
   it.each([
-    { status: 401, retained: true },
-    { status: 403, retained: false },
+    { status: 401, retained: true, cleanupDefect: false },
+    { status: 403, retained: false, cleanupDefect: false },
+    { status: 401, retained: true, cleanupDefect: true },
+    { status: 403, retained: true, cleanupDefect: true },
   ])(
-    "handles organization pull HTTP $status without conflating authentication and access loss",
-    async ({ status, retained }) => {
+    "handles organization pull HTTP $status (cleanup defect: $cleanupDefect)",
+    async ({ status, retained, cleanupDefect }) => {
       let rejectOrganizationPull = false;
+      const defect = new Error("pull cleanup failed");
+      const logError = vi.spyOn(logger.main, "error");
       const syncId = "11111111-1111-4111-8111-111111111111";
       const client = {
         bootstrap: vi.fn(
@@ -1086,6 +1358,10 @@ describe("SettingsSyncService", () => {
                         message: "Scope rejected",
                         meta: { httpStatus: 403 },
                       }),
+                ).pipe(
+                  Effect.ensuring(
+                    cleanupDefect ? Effect.die(defect) : Effect.void,
+                  ),
                 )
               : Effect.succeed({
                   collections: cursors.map(({ collection, cursor }) => ({
@@ -1132,7 +1408,9 @@ describe("SettingsSyncService", () => {
       rejectOrganizationPull = true;
       service.wake();
       await vi.waitFor(() =>
-        expect(client.pull).toHaveBeenCalledTimes(status === 401 ? 6 : 4),
+        expect(client.pull).toHaveBeenCalledTimes(
+          status === 401 && !cleanupDefect ? 6 : 4,
+        ),
       );
       await vi.waitFor(() => {
         expect(
@@ -1144,7 +1422,13 @@ describe("SettingsSyncService", () => {
         ).toBe(retained);
       });
 
-      if (status === 401) {
+      if (cleanupDefect) {
+        expect(logError).toHaveBeenCalledWith(
+          "Settings sync attempt failed unexpectedly",
+          expect.objectContaining({ defects: [defect] }),
+        );
+      }
+      if (status === 401 && !cleanupDefect) {
         expect(auth.refreshTokenIfNeeded).toHaveBeenCalledWith(true);
       } else {
         expect(auth.refreshTokenIfNeeded).not.toHaveBeenCalled();
@@ -1607,7 +1891,7 @@ describe("SettingsSyncService", () => {
           }>,
         ) => {
           if (scopeType === "org" && scopeId === "org-1") {
-            return Effect.async<SyncPullPage>((resume) => {
+            return Effect.callback<SyncPullPage>((resume) => {
               oldPull.resolve = (page) => resume(Effect.succeed(page));
               return Effect.sync(() => {
                 oldPull.interrupted = true;
@@ -1673,7 +1957,7 @@ describe("SettingsSyncService", () => {
     expect(await testDb.db.select().from(vocabulary)).toEqual([]);
   });
 
-  it("clears sync state and ignores a pull response after logout", async () => {
+  it("preserves sync state and ignores a pull response after authentication expires", async () => {
     const pullState: {
       resolve?: (page: SyncPullPage) => void;
       interrupted?: boolean;
@@ -1691,7 +1975,7 @@ describe("SettingsSyncService", () => {
         }),
       ),
       pull: vi.fn(() =>
-        Effect.async<SyncPullPage>((resume) => {
+        Effect.callback<SyncPullPage>((resume) => {
           pullState.resolve = (page) => resume(Effect.succeed(page));
           return Effect.sync(() => {
             pullState.interrupted = true;
@@ -1715,18 +1999,15 @@ describe("SettingsSyncService", () => {
         scopeId: "org-1",
       },
     ]);
-    await auth.logoutForTest();
+    await auth.expireForTest();
     expect(pullState.interrupted).toBe(true);
-    expect(await testDb.db.select().from(syncClientState)).toEqual([]);
-    expect(
-      (await testDb.db.select().from(syncCollectionState)).filter(
-        (row) => row.collection !== "note",
-      ),
-    ).toEqual([]);
+    expect(await testDb.db.select().from(syncClientState)).toHaveLength(1);
+    expect(await testDb.db.select().from(syncCollectionState)).toHaveLength(3);
     expect(await testDb.db.select().from(syncItemState)).toEqual([]);
     expect(await testDb.db.select().from(syncOutbox)).toEqual([]);
     expect(await testDb.db.select().from(vocabulary)).toEqual([
       expect.objectContaining({ word: "Personal", scopeType: "user" }),
+      expect.objectContaining({ word: "Organization", scopeType: "org" }),
     ]);
 
     const syncId = "11111111-1111-4111-8111-111111111111";
@@ -1754,7 +2035,7 @@ describe("SettingsSyncService", () => {
     expect(await testDb.db.select().from(syncItemState)).toEqual([]);
   });
 
-  it("falls back to direct cleanup if the supervisor stops before logout", async () => {
+  it("pauses without deleting data if the supervisor stops before authentication expires", async () => {
     const client = {
       bootstrap: vi.fn(
         (): Effect.Effect<SyncBootstrap> =>
@@ -1811,20 +2092,17 @@ describe("SettingsSyncService", () => {
     service.wake();
     await vi.waitFor(() => expect(handleEvent).toHaveBeenCalled());
 
-    await auth.logoutForTest();
+    await auth.expireForTest();
 
     expect(await testDb.db.select().from(vocabulary)).toEqual([
       expect.objectContaining({ word: "Personal", scopeType: "user" }),
+      expect.objectContaining({ word: "Organization", scopeType: "org" }),
     ]);
-    expect(
-      (await testDb.db.select().from(syncCollectionState)).filter(
-        (row) => row.collection !== "note",
-      ),
-    ).toEqual([]);
-    expect(await testDb.db.select().from(syncScopeState)).toEqual([]);
+    expect(await testDb.db.select().from(syncCollectionState)).toHaveLength(5);
+    expect(await testDb.db.select().from(syncScopeState)).toHaveLength(2);
   });
 
-  it("ignores a bootstrap response that arrives after logout", async () => {
+  it("retains pending writes and ignores a bootstrap response after authentication expires", async () => {
     const row = await createVocabularyWord({
       word: "Keep local",
     });
@@ -1834,7 +2112,7 @@ describe("SettingsSyncService", () => {
     } = {};
     const client = {
       bootstrap: vi.fn(() =>
-        Effect.async<SyncBootstrap>((resume) => {
+        Effect.callback<SyncBootstrap>((resume) => {
           bootstrapState.resolve = (value) => resume(Effect.succeed(value));
           return Effect.sync(() => {
             bootstrapState.interrupted = true;
@@ -1852,16 +2130,12 @@ describe("SettingsSyncService", () => {
 
     await vi.waitFor(() => expect(client.bootstrap).toHaveBeenCalledOnce());
     expect(await testDb.db.select().from(syncOutbox)).toHaveLength(1);
-    await auth.logoutForTest();
+    await auth.expireForTest();
     expect(bootstrapState.interrupted).toBe(true);
-    expect(await testDb.db.select().from(syncClientState)).toEqual([]);
-    expect(
-      (await testDb.db.select().from(syncCollectionState)).filter(
-        (row) => row.collection !== "note",
-      ),
-    ).toEqual([]);
-    expect(await testDb.db.select().from(syncItemState)).toEqual([]);
-    expect(await testDb.db.select().from(syncOutbox)).toEqual([]);
+    expect(await testDb.db.select().from(syncClientState)).toHaveLength(1);
+    expect(await testDb.db.select().from(syncCollectionState)).toHaveLength(3);
+    expect(await testDb.db.select().from(syncItemState)).toHaveLength(1);
+    expect(await testDb.db.select().from(syncOutbox)).toHaveLength(1);
     expect(await testDb.db.select().from(vocabulary)).toEqual([
       expect.objectContaining({ id: row.id, word: "Keep local" }),
     ]);
@@ -2062,7 +2336,7 @@ describe("SettingsSyncService", () => {
     await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
   });
 
-  it("notifies renderers after logout cleanup", async () => {
+  it("notifies renderers after authentication expires", async () => {
     const send = vi.fn();
     vi.mocked(BrowserWindow.getAllWindows).mockReturnValue([
       {
@@ -2079,7 +2353,7 @@ describe("SettingsSyncService", () => {
     await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
     send.mockClear();
 
-    await auth.logoutForTest();
+    await auth.expireForTest();
 
     await vi.waitFor(() =>
       expect(send).toHaveBeenCalledWith("settings-sync-updated"),
@@ -2087,14 +2361,14 @@ describe("SettingsSyncService", () => {
   });
 
   it("keeps the original poll phase across token refresh", async () => {
-    vi.useFakeTimers();
+    const run = useFakeEffectTimers();
     const startedAt = Date.now();
     const client = new InMemorySyncClient();
     service = SettingsSyncService.createForTests(
       auth as unknown as AuthService,
       client,
     );
-    await Effect.runPromise(service.initialize());
+    await run(service.initialize());
     await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
 
     const elapsed = Date.now() - startedAt;
@@ -2110,13 +2384,13 @@ describe("SettingsSyncService", () => {
   });
 
   it("syncs pending notes immediately on restart and debounces new edits without delaying vocabulary", async () => {
-    vi.useFakeTimers();
+    const run = useFakeEffectTimers();
     const client = new InMemorySyncClient(["vocabulary", "snippet", "note"]);
     service = SettingsSyncService.createForTests(
       auth as unknown as AuthService,
       client,
     );
-    await Effect.runPromise(service.initialize());
+    await run(service.initialize());
     await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
 
     const note = await createNote({ title: "Draft" });
@@ -2136,13 +2410,13 @@ describe("SettingsSyncService", () => {
     });
 
     saveNoteBody(note.id, "C");
-    await Effect.runPromise(service.shutdown());
+    await run(service.shutdown());
     // A slow startup pull must not strand the note past its old deadline.
     const originalPull = client.pull.getMockImplementation()!;
     client.pull.mockImplementationOnce((...args) =>
-      Effect.sleep(11_000).pipe(Effect.zipRight(originalPull(...args))),
+      Effect.sleep(11_000).pipe(Effect.andThen(originalPull(...args))),
     );
-    await Effect.runPromise(service.initialize());
+    await run(service.initialize());
     await vi.advanceTimersByTimeAsync(0);
     expect(client.push).toHaveBeenCalledTimes(2);
     expect(client.push.mock.calls[1][0]).toMatchObject([
@@ -2169,13 +2443,13 @@ describe("SettingsSyncService", () => {
   });
 
   it("resets the edit debounce and cancels it on shutdown", async () => {
-    vi.useFakeTimers();
+    const run = useFakeEffectTimers();
     const client = new InMemorySyncClient();
     service = SettingsSyncService.createForTests(
       auth as unknown as AuthService,
       client,
     );
-    await Effect.runPromise(service.initialize());
+    await run(service.initialize());
     await vi.waitFor(() => expect(client.pull).toHaveBeenCalledOnce());
 
     const row = await createVocabularyWord({ word: "First" });
@@ -2191,7 +2465,7 @@ describe("SettingsSyncService", () => {
 
     await updateVocabulary(row.id, { word: "Pending at shutdown" });
     await vi.advanceTimersByTimeAsync(0);
-    await Effect.runPromise(service.shutdown());
+    await run(service.shutdown());
     await vi.advanceTimersByTimeAsync(750);
 
     expect(client.bootstrap).toHaveBeenCalledTimes(2);
@@ -2215,7 +2489,7 @@ describe("SettingsSyncService", () => {
         }),
       ),
       pull: vi.fn(() =>
-        Effect.async<SyncPullPage>(() =>
+        Effect.callback<SyncPullPage>(() =>
           Effect.sync(() => {
             pullInterrupted = true;
           }),
@@ -2269,7 +2543,7 @@ describe("SettingsSyncService", () => {
             concurrentPulls += 1;
             maxConcurrentPulls = Math.max(maxConcurrentPulls, concurrentPulls);
             if (client.pull.mock.calls.length === 1) {
-              yield* Effect.async<void>((resume) => {
+              yield* Effect.callback<void>((resume) => {
                 pullState.release = () => resume(Effect.void);
               });
             }

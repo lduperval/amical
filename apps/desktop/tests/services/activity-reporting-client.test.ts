@@ -3,7 +3,10 @@ import { Effect, Fiber } from "effect";
 
 import type { AuthService } from "../../src/services/auth-service";
 import { ActivityReportingClient } from "../../src/services/activity-reporting-client";
-import { AMICAL_PLATFORM_HEADER } from "../../src/utils/http-client";
+import {
+  AMICAL_PLATFORM_HEADER,
+  getAmicalClientInfo,
+} from "../../src/utils/http-client";
 import type { DictationActivity } from "../../src/types/activity";
 import {
   AuthenticationRequired,
@@ -46,6 +49,7 @@ describe("ActivityReportingClient", () => {
   afterEach(() => {
     delete process.env.CORE_API_URL;
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("posts through Apps V1 with auth and platform headers and accepts empty 200", async () => {
@@ -59,7 +63,9 @@ describe("ActivityReportingClient", () => {
     ];
     expect(url.toString()).toBe("https://core.test/apps/v1/me/activities");
     expect(init.headers.Authorization).toBe("Bearer id-token");
-    expect(init.headers[AMICAL_PLATFORM_HEADER]).toBe(process.platform);
+    expect(init.headers[AMICAL_PLATFORM_HEADER]).toBe(
+      getAmicalClientInfo().platform,
+    );
     expect(JSON.parse(init.body)).toEqual({ activities: [activity] });
     expect(JSON.parse(init.body)).not.toHaveProperty("platform");
   });
@@ -131,6 +137,30 @@ describe("ActivityReportingClient", () => {
       runClient(tokenlessClient.submit([activity])),
     ).rejects.toBeInstanceOf(AuthenticationRequired);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("times out a stalled upload after 30 seconds", async () => {
+    const timeoutController = new AbortController();
+    const timeout = vi
+      .spyOn(AbortSignal, "timeout")
+      .mockReturnValue(timeoutController.signal);
+    fetchMock.mockImplementation(
+      (_url: URL, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal!.addEventListener(
+            "abort",
+            () => reject(init.signal!.reason),
+            { once: true },
+          );
+        }),
+    );
+    const request = runClient(client.submit([activity]));
+    const rejected =
+      expect(request).rejects.toBeInstanceOf(CloudNetworkFailure);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    expect(timeout).toHaveBeenCalledWith(30_000);
+    timeoutController.abort(new DOMException("Timed out", "TimeoutError"));
+    await rejected;
   });
 
   it("aborts an in-flight request when interrupted", async () => {

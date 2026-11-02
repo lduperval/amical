@@ -1,4 +1,5 @@
 import { observable } from "@trpc/server/observable";
+import { clipboard, powerMonitor } from "electron";
 import { createRouter, procedure } from "../trpc";
 import { v4 as uuid } from "uuid";
 import { z } from "zod";
@@ -20,6 +21,29 @@ import type {
 } from "../../main/lifecycle/runtime";
 import type { LifecycleSessionMeta } from "../../main/lifecycle/metadata";
 import type { LifecycleSnapshot } from "../../main/lifecycle/shell";
+import {
+  CaptureTimingsSchema,
+  type CaptureTimingsBatch,
+} from "../../types/capture-timings";
+import {
+  recordAudioContextTelemetry,
+  recordCaptureErrorName,
+  recordCapturePhases,
+  settleObligation,
+} from "../../main/telemetry/dictation-trace";
+import { vocabularyLearningNotifications } from "../../services/vocabulary-learning/notifications";
+
+function recordCaptureTimings(
+  sessionId: string,
+  timings?: CaptureTimingsBatch,
+): void {
+  if (timings) {
+    recordCapturePhases(sessionId, timings.phases);
+    if (timings.audioContext) {
+      recordAudioContextTelemetry(sessionId, timings.audioContext);
+    }
+  }
+}
 
 interface RecordingStateUpdate {
   sessionId: string | null;
@@ -72,6 +96,12 @@ export const recordingRouter = createRouter({
     requireLifecycle(ctx).dismissDraft();
   }),
 
+  // Copy runs here, not in the widget: the widget window is never focused
+  // (focusable: false), so navigator.clipboard rejects there.
+  copyDraft: procedure.input(z.string()).mutation(({ input }) => {
+    clipboard.writeText(input);
+  }),
+
   dismiss: procedure.mutation(async ({ ctx }) => {
     await requireLifecycle(ctx).dismiss();
   }),
@@ -82,9 +112,12 @@ export const recordingRouter = createRouter({
         sessionId: z.string(),
         microphoneName: z.string().optional(),
         captureSource: z.enum(["preferred", "default"]).optional(),
+        timings: CaptureTimingsSchema.optional(),
       }),
     )
     .mutation(({ ctx, input }) => {
+      // Main registers the timing-report obligation when capture is dispatched.
+      recordCaptureTimings(input.sessionId, input.timings);
       requireLifecycle(ctx).captureStarted(input.sessionId, {
         name: input.microphoneName,
       });
@@ -96,10 +129,26 @@ export const recordingRouter = createRouter({
         sessionId: z.string(),
         name: z.string().optional(),
         message: z.string(),
+        timings: CaptureTimingsSchema.optional(),
       }),
     )
     .mutation(({ ctx, input }) => {
+      recordCaptureTimings(input.sessionId, input.timings);
+      if (input.name) recordCaptureErrorName(input.sessionId, input.name);
       requireLifecycle(ctx).captureFailed(input.sessionId, input);
+    }),
+
+  captureTimings: procedure
+    .input(
+      z.object({
+        sessionId: z.string(),
+        timings: CaptureTimingsSchema,
+        complete: z.boolean(),
+      }),
+    )
+    .mutation(({ input }) => {
+      recordCaptureTimings(input.sessionId, input.timings);
+      if (input.complete) settleObligation(input.sessionId, "capture.timings");
     }),
 
   // Using Observable instead of async generator due to Symbol.asyncDispose conflict
@@ -117,6 +166,16 @@ export const recordingRouter = createRouter({
       return lifecycle.onSnapshot((snapshot) => {
         emit.next(toStateUpdate(snapshot));
       });
+    });
+  }),
+
+  systemResume: procedure.subscription(() => {
+    return observable<null>((emit) => {
+      const onResume = () => emit.next(null);
+      powerMonitor.on("resume", onResume);
+      return () => {
+        powerMonitor.off("resume", onResume);
+      };
     });
   }),
 
@@ -164,7 +223,16 @@ export const recordingRouter = createRouter({
         });
       };
 
-      return lifecycle.onNotification(handleNotification);
+      const unsubscribeLifecycle = lifecycle.onNotification(handleNotification);
+      // Second source: the vocabulary learning service builds its toasts
+      // (title, Undo and View actions) itself.
+      const unsubscribeLearned = vocabularyLearningNotifications.onLearned(
+        (notification) => emit.next(notification),
+      );
+      return () => {
+        unsubscribeLifecycle();
+        unsubscribeLearned();
+      };
     });
   }),
 

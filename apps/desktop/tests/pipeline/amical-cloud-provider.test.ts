@@ -187,6 +187,7 @@ import {
   AuthenticationRequired,
   CloudQuotaExceeded as CloudQuotaExceededVariant,
   IdleTimeout,
+  NetworkFailure,
 } from "../../src/types/errors";
 import { Effect as EffectLib } from "effect";
 import type {
@@ -305,11 +306,12 @@ const settleGrpcOk = (
   rawTranscript: string,
   formattedTranscript = rawTranscript,
   throughSeq = "1",
+  language?: string,
 ) => {
   const stream = grpcMock.getLastStream();
   if (!stream) throw new Error("No grpc stream constructed");
   stream.emit("data", {
-    final: { rawTranscript, formattedTranscript, throughSeq },
+    final: { rawTranscript, formattedTranscript, throughSeq, language },
   });
   stream.emit("status", {
     code: grpcMock.status.OK,
@@ -411,6 +413,25 @@ describe("AmicalCloudProvider", () => {
       expect(result.text).toBe("hello world");
       expect(grpcMock.getLastClient()).toBeNull();
       expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("gRPC final transcript", () => {
+    it("returns the session language as the detected language", async () => {
+      const provider = openCloudSessionWithTransport("grpc");
+      await provider.transcribe({
+        audioData: audioFrame(),
+        speechProbability: 1,
+        context: baseContext(),
+      });
+      const finalization = provider.flush(baseContext());
+      await flush();
+      settleGrpcOk("colour", "Colour.", "1", "en");
+
+      await expect(finalization).resolves.toEqual({
+        text: "Colour.",
+        detectedLanguage: "en",
+      });
     });
   });
 
@@ -715,6 +736,62 @@ describe("AmicalCloudProvider", () => {
         "amical-labs": "self-correction",
         "Accept-Language": "ja",
       });
+    });
+  });
+
+  describe("HTTP language lock", () => {
+    const selection = ["en-GB", "de"];
+    const context = baseContext({ languages: selection });
+
+    // Each call buffers 28 seconds, which sends one non-final request.
+    const sendChunk = (
+      provider: TestCloudSession,
+      response: Record<string, unknown>,
+    ) => {
+      mockFetchOnce({ status: 200, json: { success: true, ...response } });
+      return provider.transcribe({
+        audioData: audioFrame(HTTP_AUTO_FLUSH_SAMPLES),
+        speechProbability: 1,
+        context,
+      });
+    };
+    const sentLanguages = () =>
+      fetchMock.mock.calls.map(
+        (_, index) => httpRequestBody(index).languages as string[],
+      );
+
+    it("locks to the selected code of the first reported language and keeps it", async () => {
+      const provider = openCloudSessionWithTransport("http");
+
+      await sendChunk(provider, { transcription: "Hello", language: "en" });
+      await sendChunk(provider, { transcription: "Hello there" });
+      mockFetchOnce({
+        status: 200,
+        json: { success: true, transcription: "Hello there." },
+      });
+      await provider.flush({
+        ...context,
+        aggregatedTranscription: "Hello there",
+      });
+
+      expect(sentLanguages()).toEqual([selection, ["en-GB"], ["en-GB"]]);
+      expect(httpRequestBody(2)).toMatchObject({ isFinal: true });
+    });
+
+    it("keeps the full list until a selected language is reported with text", async () => {
+      const provider = openCloudSessionWithTransport("http");
+
+      await sendChunk(provider, { transcription: "Bonjour", language: "fr" });
+      await sendChunk(provider, { transcription: "", language: "de" });
+      await sendChunk(provider, { transcription: "Hallo", language: "de" });
+      await sendChunk(provider, { transcription: "Hallo zusammen" });
+
+      expect(sentLanguages()).toEqual([
+        selection,
+        selection,
+        selection,
+        ["de"],
+      ]);
     });
   });
 
@@ -1953,7 +2030,7 @@ describe("AmicalCloudProvider", () => {
       });
       let resolveToken!: (token: string) => void;
       authMock.instance.getIdToken.mockImplementationOnce(() =>
-        EffectLib.async<string>((resume) => {
+        EffectLib.callback<string>((resume) => {
           resolveToken = (token) => resume(EffectLib.succeed(token));
         }),
       );
@@ -1983,7 +2060,7 @@ describe("AmicalCloudProvider", () => {
       });
       let releaseAuthentication!: () => void;
       authMock.instance.isAuthenticated.mockImplementationOnce(() =>
-        EffectLib.async<boolean>((resume) => {
+        EffectLib.callback<boolean>((resume) => {
           releaseAuthentication = () => resume(EffectLib.succeed(true));
         }),
       );
@@ -2056,7 +2133,7 @@ describe("AmicalCloudProvider", () => {
       });
       let resolveToken!: (token: string) => void;
       authMock.instance.getIdToken.mockImplementationOnce(() =>
-        EffectLib.async<string>((resume) => {
+        EffectLib.callback<string>((resume) => {
           resolveToken = (token) => resume(EffectLib.succeed(token));
         }),
       );
@@ -2590,6 +2667,84 @@ describe("error characterization pins", () => {
   });
 
   describe("provider exit settle (mixed cause integration)", () => {
+    it("keeps a token-refresh finalizer defect when an HTTP 401 triggers refresh", async () => {
+      // eslint-disable-next-line turbo/no-undeclared-env-vars
+      process.env.CLOUD_DICTATION_TRANSPORT = "http";
+      const captureException = vi.fn();
+      const session = openCloudSession(
+        new AmicalCloudProvider(
+          authMock.instance as unknown as AuthService,
+          { captureException } as unknown as TelemetryService,
+        ),
+      );
+      const typed = new NetworkFailure({ message: "refresh failed" });
+      const finalizerBug = new RangeError("refresh cleanup failed");
+      authMock.instance.refreshTokenIfNeeded.mockReturnValueOnce(
+        EffectLib.fail(typed).pipe(
+          EffectLib.ensuring(EffectLib.die(finalizerBug)),
+        ),
+      );
+      mockFetchOnce({ status: 401, json: { error: {} } });
+      await session.transcribe({
+        audioData: audioFrame(),
+        speechProbability: 1,
+        context: baseContext(),
+      });
+
+      await expect(session.flush(baseContext())).rejects.toBe(typed);
+
+      expect(captureException).toHaveBeenCalledExactlyOnceWith(finalizerBug, {
+        source: "dictation",
+        session_id: "session-1",
+      });
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
+    it("does not hide a gRPC finalizer defect behind successful HTTP fallback", async () => {
+      // eslint-disable-next-line turbo/no-undeclared-env-vars
+      process.env.CLOUD_DICTATION_TRANSPORT = "grpc";
+      const captureException = vi.fn();
+      const trackCloudGrpcFallback = vi.fn();
+      const session = openCloudSession(
+        new AmicalCloudProvider(
+          authMock.instance as unknown as AuthService,
+          {
+            captureException,
+            trackCloudGrpcFallback,
+          } as unknown as TelemetryService,
+        ),
+      );
+      const typed = new NetworkFailure({ message: "connection failed" });
+      const finalizerBug = new RangeError("gRPC cleanup failed");
+      const transport = (
+        session as unknown as {
+          grpcTransport: {
+            transcribeGrpcEffect(): EffectLib.Effect<never, NetworkFailure>;
+          };
+        }
+      ).grpcTransport;
+      vi.spyOn(transport, "transcribeGrpcEffect").mockReturnValue(
+        EffectLib.fail(typed).pipe(
+          EffectLib.ensuring(EffectLib.die(finalizerBug)),
+        ),
+      );
+
+      await expect(
+        session.transcribe({
+          audioData: audioFrame(),
+          speechProbability: 1,
+          context: baseContext(),
+        }),
+      ).rejects.toBe(typed);
+
+      expect(captureException).toHaveBeenCalledExactlyOnceWith(finalizerBug, {
+        source: "dictation",
+        session_id: "session-1",
+      });
+      expect(trackCloudGrpcFallback).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
     it("settles a mixed CloudError + dying finalizer with the typed value and captures the co-defect once", async () => {
       const captureException = vi.fn();
       const trackCloudGrpcFallback = vi.fn();

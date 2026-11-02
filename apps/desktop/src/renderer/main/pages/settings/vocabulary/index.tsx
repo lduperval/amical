@@ -13,6 +13,12 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { api } from "@/trpc/react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
@@ -23,6 +29,8 @@ type VocabularyItem = {
   scopeId: string;
   word: string;
   replacementWord: string | null;
+  source: "manual" | "auto";
+  observedSource: string | null;
   dateAdded: Date;
   usageCount: number | null;
   createdAt: Date;
@@ -30,6 +38,9 @@ type VocabularyItem = {
 };
 
 type ScopeFilter = "all" | "user" | "org";
+
+// Keep hidden until team-plan eligibility is available.
+const ORGANIZATION_VOCABULARY_ENABLED = false;
 
 // Add/Edit Dialog Component
 interface VocabularyDialogProps {
@@ -218,7 +229,13 @@ export default function VocabularySettingsPage() {
     replacementWord: "",
     replacementEnabled: false,
   });
-  const [scope, setScope] = useState<ScopeFilter>("all");
+  const [selectedScope, setScope] = useState<ScopeFilter>("all");
+  const scopeAccessQuery = api.vocabulary.getScopeAccess.useQuery(undefined, {
+    enabled: ORGANIZATION_VOCABULARY_ENABLED,
+  });
+  const showOrganizationVocabulary =
+    ORGANIZATION_VOCABULARY_ENABLED && scopeAccessQuery.data != null;
+  const scope = showOrganizationVocabulary ? selectedScope : "user";
 
   const vocabularyQuery = api.vocabulary.getVocabulary.useQuery({
     limit: 200,
@@ -227,7 +244,6 @@ export default function VocabularySettingsPage() {
     sortOrder: "desc",
     scope,
   });
-  const scopeAccessQuery = api.vocabulary.getScopeAccess.useQuery();
 
   const vocabularyItems = vocabularyQuery.data || [];
   const vocabularyLoading = vocabularyQuery.isLoading;
@@ -443,25 +459,27 @@ export default function VocabularySettingsPage() {
         </Dialog>
       </div>
 
-      <div
-        className="flex items-center gap-1 mb-4"
-        role="tablist"
-        aria-label={t("settings.vocabulary.scope.label")}
-      >
-        {(["all", "user", "org"] as const).map((filter) => (
-          <Button
-            key={filter}
-            type="button"
-            size="sm"
-            variant={scope === filter ? "secondary" : "ghost"}
-            role="tab"
-            aria-selected={scope === filter}
-            onClick={() => setScope(filter)}
-          >
-            {t(`settings.vocabulary.scope.${filter}`)}
-          </Button>
-        ))}
-      </div>
+      {showOrganizationVocabulary && (
+        <div
+          className="flex items-center gap-1 mb-4"
+          role="tablist"
+          aria-label={t("settings.vocabulary.scope.label")}
+        >
+          {(["all", "user", "org"] as const).map((filter) => (
+            <Button
+              key={filter}
+              type="button"
+              size="sm"
+              variant={scope === filter ? "secondary" : "ghost"}
+              role="tab"
+              aria-selected={scope === filter}
+              onClick={() => setScope(filter)}
+            >
+              {t(`settings.vocabulary.scope.${filter}`)}
+            </Button>
+          ))}
+        </div>
+      )}
 
       {scope === "org" && !organizationWritable && (
         <p className="mb-4 text-sm text-muted-foreground" role="status">
@@ -500,11 +518,31 @@ export default function VocabularySettingsPage() {
                       ) : (
                         item.word
                       )}
-                      <span className="ml-2 rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                        {item.scopeType === "user"
-                          ? t("settings.vocabulary.scope.personalBadge")
-                          : t("settings.vocabulary.scope.organizationBadge")}
-                      </span>
+                      {item.source === "auto" && (
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="ml-2 rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                                {t("settings.vocabulary.learned.badge")}
+                              </span>
+                            </TooltipTrigger>
+                            {item.observedSource && (
+                              <TooltipContent>
+                                {t("settings.vocabulary.learned.tooltip", {
+                                  heard: item.observedSource,
+                                })}
+                              </TooltipContent>
+                            )}
+                          </Tooltip>
+                        </TooltipProvider>
+                      )}
+                      {showOrganizationVocabulary && (
+                        <span className="ml-2 rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                          {item.scopeType === "user"
+                            ? t("settings.vocabulary.scope.personalBadge")
+                            : t("settings.vocabulary.scope.organizationBadge")}
+                        </span>
+                      )}
                     </span>
                     {(item.scopeType === "user" || organizationWritable) && (
                       <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">

@@ -34,6 +34,17 @@
   "updater": {
     "updateAvailable": "Actualización disponible",
     "requiredUpdate": "Actualización requerida",
+    "appBlocked": "Esta versión de Amical ya no cuenta con soporte. Actualiza ahora para continuar.",
+    "finishingRecording": "Termina tu grabación actual. Amical la guardará antes de que actualices.",
+    "requiredUpdateFailed": "No se pudo completar la actualización. Inténtalo de nuevo.",
+    "checking": "Buscando actualizaciones…",
+    "downloading": "Descargando…",
+    "restarting": "Reiniciando…",
+    "tryAgain": "Intentar de nuevo",
+    "updateNow": "Actualizar ahora",
+    "manualDownload": "Descargar manualmente",
+    "manualDownloadFailed": "No se pudo abrir la página de descarga. Inténtalo de nuevo.",
+    "quit": "Salir de Amical",
     "versionAvailable": "La versión {{version}} está disponible.",
     "versionRequired": "Se requiere la versión {{version}}.",
     "restartAndUpdate": "Reiniciar y actualizar",
@@ -321,7 +332,9 @@
         "settings": "Configuración",
         "aiModels": "Modelos de IA",
         "configureMicrophone": "Configurar micrófono",
-        "upgradePlan": "Mejorar plan"
+        "upgradePlan": "Mejorar plan",
+        "undo": "Deshacer",
+        "view": "Ver"
       },
       "type": {
         "noAudio": {
@@ -339,6 +352,9 @@
         "recordingAutoStopped": {
           "title": "Dictado detenido automáticamente",
           "description": "Se alcanzó la duración máxima de dictado. Inicia un nuevo dictado si es necesario."
+        },
+        "vocabularyLearned": {
+          "title": "Se agregó {{terms}} a tu vocabulario"
         }
       },
       "errorCode": {
@@ -505,6 +521,7 @@
           "de": "Deutsch",
           "es": "Español",
           "ja": "日本語",
+          "ko": "한국어",
           "zh-TW": "繁體中文"
         },
         "restartDialog": {
@@ -550,6 +567,10 @@
       "preserveClipboard": {
         "label": "Conservar el contenido del portapapeles",
         "description": "Después de pegar una transcripción, restaura lo que antes estaba en el portapapeles."
+      },
+      "widgetOutline": {
+        "label": "Mostrar contorno de la píldora",
+        "description": "Muestra un contorno y un tinte rosa alrededor del widget flotante para comprobar sus límites."
       },
       "debugMode": {
         "label": "Modo de depuración",
@@ -751,7 +772,8 @@
         },
         "languagesLabel": "Idiomas",
         "languagesPlaceholder": "Seleccionar idiomas...",
-        "noResults": "No se encontraron idiomas."
+        "noResults": "No se encontraron idiomas.",
+        "cloudOnlyHint": "Solo en la nube. Los modelos locales usan el idioma base."
       },
       "microphone": {
         "label": "Micrófono",
@@ -849,9 +871,11 @@
         "invalidKeyCombination": "Combinación de teclas no válida",
         "alreadyAssigned": "El atajo ya está asignado",
         "conflictsWithSystem": "{{shortcut}} entra en conflicto con un atajo del sistema",
-        "addModifier": "Agrega una tecla modificadora como Cmd, Ctrl o Fn",
+        "addModifier": "Agrega una tecla modificadora como {{mod1}}, {{mod2}} o {{mod3}}",
         "duplicateModifierPairs": "No se pueden usar las teclas {{modifier}} izquierda y derecha juntas",
-        "overlapsWithPushToTalk": "Esto se superpone con tu atajo de Pulsar para hablar y puede causar problemas"
+        "overlapsWithPushToTalk": "Esto se superpone con tu atajo de Pulsar para hablar y puede causar problemas",
+        "linuxPortalTriggerRequired": "Los atajos de Wayland necesitan exactamente una tecla de activación que no sea modificadora, como Espacio o una letra",
+        "linuxGlobalShortcutsUnavailable": "Tu escritorio Wayland no ofrece el portal de atajos globales. Este atajo se ha guardado, pero no puede activar Amical; usa el control flotante."
       },
       "input": {
         "pressKeys": "Presiona las teclas...",
@@ -864,6 +888,7 @@
     },
     "notes": {
       "create": "Crear nota",
+      "loading": "Cargando nota...",
       "defaultTitleWithDate": "Nota - {{date}}",
       "untitledTitle": "Nota sin título",
       "empty": {
@@ -909,6 +934,18 @@
           "description": "Conecta tu calendario para comenzar",
           "button": "Conectar calendario"
         }
+      },
+      "recovery": {
+        "loadFailed": "No se pudo cargar la nota. Ciérrala y vuelve a abrirla para intentarlo de nuevo.",
+        "blocked": "No se pudo convertir esta nota. Sus datos originales se conservan para recuperarla.",
+        "details": "Detalles de recuperación",
+        "deletedNote": "Esta nota se eliminó o no está disponible en esta cuenta.",
+        "recovered": "Esta nota se eliminó en otro dispositivo. Tus cambios se guardaron como una copia en conflicto en tus notas.",
+        "format": "Este formato no se puede guardar como Markdown. Usa negrita, cursiva, tachado o código. Si pegaste texto con un formato no compatible, deshaz esa acción para poder guardar.",
+        "error": "No se pudieron guardar los cambios. Mantén esta ventana abierta e intenta editar de nuevo."
+      },
+      "cloud": {
+        "error": "Guardado en este dispositivo. Hay un problema con la sincronización en la nube: {{reason}}"
       }
     },
     "vocabulary": {
@@ -954,6 +991,10 @@
         "cancel": "Cancelar",
         "deleting": "Eliminando...",
         "confirm": "Eliminar"
+      },
+      "learned": {
+        "badge": "Aprendida",
+        "tooltip": "Agregada a partir de tu corrección. Se escuchó como «{{heard}}»."
       }
     },
     "snippets": {

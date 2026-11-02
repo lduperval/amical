@@ -6,6 +6,13 @@ import { getMainFeatureFlagState } from "@/main/utils/feature-flags";
 import { NOTE_WINDOW_FEATURE_FLAG } from "@/utils/feature-flags";
 
 export const widgetRouter = createRouter({
+  // Which Linux display backend the widget window lives on. Native Wayland
+  // cannot be moved by the main process (see WindowManager); the renderer
+  // then offers a compositor-driven drag handle instead.
+  linuxWindowingMode: procedure.query(({ ctx }) =>
+    ctx.services.windowManager.getLinuxWindowingMode(),
+  ),
+
   drag: procedure
     .input(
       z.discriminatedUnion("phase", [
@@ -53,15 +60,28 @@ export const widgetRouter = createRouter({
       return true;
     }),
 
+  setControlSize: procedure
+    .input(
+      z.object({
+        width: z.number().int().min(1).max(640),
+        height: z.number().int().min(1).max(320),
+      }),
+    )
+    .mutation(({ ctx, input }) => {
+      ctx.services.windowManager.setWidgetControlSize(input);
+      return true;
+    }),
+
   setIgnoreMouseEvents: procedure
     .input(
       z.object({
         ignore: z.boolean(),
+        expanded: z.boolean().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
       const windowManager = ctx.services.windowManager;
-      windowManager.setWidgetIgnoreMouseEvents(input.ignore);
+      windowManager.setWidgetIgnoreMouseEvents(input.ignore, input.expanded);
       logger.main.debug("Set widget ignore mouse events", input);
       return true;
     }),

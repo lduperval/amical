@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="UTF-8" />
-  <title>Widget</title>
+  <title>Amical Widget</title>
   <!-- Favicon links -->
   <link rel="icon" type="image/x-icon" href="/assets/logo.ico" />
   <link rel="icon" type="image/png" sizes="16x16" href="/assets/icon-16x16.png" />
@@ -19,6 +19,10 @@
       background-color: transparent; /* Ensure body is transparent */
       font-family: sans-serif;
     }
+    #root.show-widget-outline {
+      background-color: rgba(255, 0, 128, 0.25);
+      box-shadow: inset 0 0 0 2px #ff0080;
+    }
     #root {
       width: 100%;
       height: 100%;
@@ -33,4 +37,4 @@
   <!-- This script tag will point to the TSX file for Vite to process -->
   <script type="module" src="src/renderer/widget/index.tsx"></script>
 </body>
-</html> 
+</html>
