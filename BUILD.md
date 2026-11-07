@@ -300,20 +300,15 @@ To verify device creation on the host without sending any keystrokes:
 cargo test --features uinput creates_real_virtual_keyboard -- --ignored --nocapture
 ```
 
-The extension can be exercised without logging out by running a second GNOME
-Shell headlessly on a private session bus; it loads the extension from
-`~/.local/share/gnome-shell/extensions` and clients reach it through that
-bus and Wayland display:
+Exercise the extension in a VM or a dedicated test user's desktop session.
+Do not start a nested/headless GNOME Shell under the account whose desktop is
+currently in use. A private `dbus-run-session` alone does not isolate per-user
+AT-SPI sockets, desktop portals, or activation of system services; these tests
+have caused secondary accessibility-bus and headless-shell crashes.
 
-```bash
-dbus-run-session -- env GSETTINGS_BACKEND=keyfile XDG_CONFIG_HOME=/tmp/amical-shell bash -c '
-  gsettings set org.gnome.shell enabled-extensions "[\"amical@amical.ai\"]"
-  gnome-shell --headless --virtual-monitor 1280x800 --wayland-display wayland-amical-test --no-x11 &
-  sleep 5
-  busctl --user call org.gnome.Shell /org/gnome/Shell/Extensions/Amical org.gnome.Shell.Extensions.Amical GetStatus
-  WAYLAND_DISPLAY=wayland-amical-test <your test client>
-'
-```
+The MPRIS helper tests instead use a custom private D-Bus configuration with
+no service activation directories. This prevents their helper subprocesses
+from starting AT-SPI, portals, or keyrings in the real desktop session.
 
 For a manual end-to-end check, focus an editable field in a browser, text editor,
 and terminal in turn. Hold the shortcut configured in Amical, dictate a short

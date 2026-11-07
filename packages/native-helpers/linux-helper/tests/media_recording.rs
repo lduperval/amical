@@ -105,6 +105,29 @@ impl Drop for Helper {
 }
 
 #[tokio::test]
+async fn test_bus_cannot_activate_desktop_accessibility_or_portal_services() {
+    let bus = TestBus::new();
+    let connection = bus.connection().await;
+    let proxy = zbus::fdo::DBusProxy::new(&connection).await.unwrap();
+    let activatable = proxy.list_activatable_names().await.unwrap();
+    for service in [
+        "org.a11y.Bus",
+        "org.freedesktop.portal.Desktop",
+        "org.freedesktop.secrets",
+    ] {
+        assert!(!activatable.iter().any(|name| name.as_str() == service));
+        assert!(proxy
+            .start_service_by_name(service.try_into().unwrap(), 0)
+            .await
+            .is_err());
+        assert!(!proxy
+            .name_has_owner(service.try_into().unwrap())
+            .await
+            .unwrap());
+    }
+}
+
+#[tokio::test]
 async fn recording_pauses_and_stop_or_cancellation_resumes_media() {
     let bus = TestBus::new();
     let state = Arc::new(Mutex::new(State {

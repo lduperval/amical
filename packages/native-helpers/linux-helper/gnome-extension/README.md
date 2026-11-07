@@ -67,6 +67,6 @@ the next placement and makes the pill drift on each recording transition.
 
 - `node --input-type=module --check < amical@amical.ai/extension.js` checks the syntax.
 - `journalctl --user -f -o cat /usr/bin/gnome-shell` shows extension errors.
-- A nested shell (`dbus-run-session -- gnome-shell --nested --wayland`) loads
-  the extension without logging out; point clients at its `WAYLAND_DISPLAY`
-  and `DBUS_SESSION_BUS_ADDRESS`.
+- Test nested/headless GNOME Shell instances in a VM or a dedicated test user's
+  session. Do not run them under the account with the active desktop: a private
+  session bus does not isolate AT-SPI sockets or desktop-service activation.

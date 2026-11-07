@@ -17,11 +17,34 @@ use zbus::{connection, SignalContext};
 pub struct TestBus {
     daemon: Child,
     pub address: String,
+    _config: tempfile::TempDir,
 }
 impl TestBus {
     pub fn new() -> Self {
+        let config = tempfile::tempdir().unwrap();
+        let config_path = config.path().join("bus.conf");
+        // --session loads the desktop's activation directories. Even a private
+        // bus can then launch portals, keyrings and AT-SPI against the real
+        // user's runtime sockets. These tests only need explicitly registered
+        // fake players, so deliberately supply no service activation paths.
+        std::fs::write(
+            &config_path,
+            r#"<busconfig>
+  <type>session</type>
+  <listen>unix:tmpdir=/tmp</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow send_destination="*"/>
+    <allow receive_sender="*"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>"#,
+        )
+        .unwrap();
         let mut daemon = Command::new("dbus-daemon")
-            .args(["--session", "--nofork", "--print-address=1"])
+            .arg("--config-file")
+            .arg(&config_path)
+            .args(["--nofork", "--print-address=1"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -33,6 +56,7 @@ impl TestBus {
         Self {
             daemon,
             address: address.trim().to_owned(),
+            _config: config,
         }
     }
     pub async fn connection(&self) -> Connection {
