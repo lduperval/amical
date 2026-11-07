@@ -127,7 +127,9 @@ ipcMain.handle(
 
 // Set App User Model ID for Windows (required for Squirrel.Windows)
 if (isWindows()) {
-  app.setAppUserModelId("ai.amical.desktop");
+  app.setAppUserModelId(
+    app.isPackaged ? "ai.amical.desktop" : "ai.amical.desktop.dev",
+  );
 }
 
 // Register the deep-link protocol. Unpackaged dev builds use their own scheme

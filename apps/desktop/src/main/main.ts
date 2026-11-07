@@ -4,6 +4,8 @@ import path from "node:path";
 import { showFatalStartupDialog } from "./fatal-startup-dialog";
 import { getLinuxOzonePlatform } from "../utils/linux-windowing";
 
+if (!app.isPackaged) app.setName("AmicalDev");
+
 // Configure Chromium synchronously in the entry point, before loading the
 // application's dependency graph. The Ozone switch must be applied before
 // Electron initializes its display services.

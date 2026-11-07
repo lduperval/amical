@@ -48,7 +48,9 @@ export class TrayManager {
     this.tray = new Tray(icon);
 
     // Set tooltip
-    this.tray.setToolTip(t("tray.tooltip"));
+    this.tray.setToolTip(
+      app.isPackaged ? t("tray.tooltip") : `AmicalDev (${app.getVersion()})`,
+    );
 
     // Click and double-click can arrive before async window creation finishes.
     const openWindow = () => this.openConsole("tray");
@@ -60,6 +62,12 @@ export class TrayManager {
 
     // Create context menu
     const contextMenu = Menu.buildFromTemplate([
+      ...(!app.isPackaged
+        ? [
+            { label: "AmicalDev", enabled: false },
+            { type: "separator" as const },
+          ]
+        : []),
       {
         label: t("tray.openConsole"),
         click: openWindow,
@@ -81,7 +89,7 @@ export class TrayManager {
       },
       { type: "separator" as const },
       {
-        label: t("tray.quit"),
+        label: app.isPackaged ? t("tray.quit") : `${t("tray.quit")} AmicalDev`,
         click: () => {
           logger.main.info("Quit requested from tray");
           app.quit();

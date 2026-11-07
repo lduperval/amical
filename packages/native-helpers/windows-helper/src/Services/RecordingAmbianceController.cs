@@ -11,17 +11,23 @@ namespace WindowsHelper.Services
         private readonly Func<bool> muteSystemAudio;
         private readonly Func<bool> restoreSystemAudio;
         private readonly Action<string> log;
+        private readonly Func<bool, Task>? pauseMedia;
+        private readonly Func<Task>? resumeMedia;
 
         internal RecordingAmbianceController(
             Func<string, Task> playSound,
             Func<bool> muteSystemAudio,
             Func<bool> restoreSystemAudio,
-            Action<string> log)
+            Action<string> log,
+            Func<bool, Task>? pauseMedia = null,
+            Func<Task>? resumeMedia = null)
         {
             this.playSound = playSound;
             this.muteSystemAudio = muteSystemAudio;
             this.restoreSystemAudio = restoreSystemAudio;
             this.log = log;
+            this.pauseMedia = pauseMedia;
+            this.resumeMedia = resumeMedia;
         }
 
         internal async Task<bool> StartRecordingAsync(bool shouldMute, bool muteSounds)
@@ -34,7 +40,10 @@ namespace WindowsHelper.Services
                     await PlayBestEffortAsync("rec-start");
                 }
 
-                return !shouldMute || muteSystemAudio();
+                var success = !shouldMute || muteSystemAudio();
+                // Keep the start sound and mute timing unchanged while discovering players.
+                if (pauseMedia != null) await pauseMedia(shouldMute);
+                return success;
             }
             finally
             {
@@ -57,7 +66,15 @@ namespace WindowsHelper.Services
             }
             finally
             {
-                gate.Release();
+                try
+                {
+                    // Resume even when muting failed or restoring the audio device throws.
+                    if (resumeMedia != null) await resumeMedia();
+                }
+                finally
+                {
+                    gate.Release();
+                }
             }
         }
 
