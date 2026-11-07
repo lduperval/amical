@@ -26,8 +26,10 @@ for device permissions and testing.
 With **Mute system audio during recording** enabled, the helper pauses active
 MPRIS players and resumes only those it paused when recording ends or is
 cancelled. Media resumes from its paused position. Already paused players stay
-paused, and a playback/track change, seek, closed player, or unavailable Play
-control cancels automatic resume. The helper also restores playback when its
+paused, and a playback/track change, closed player, or unavailable Play
+control cancels automatic resume. A browser's position update during Pause does
+not cancel resume; seeking during dictation preserves the newly selected
+position. The helper also restores playback when its
 parent closes the RPC input normally.
 
 This talks directly to the session D-Bus using the existing Rust dependencies;

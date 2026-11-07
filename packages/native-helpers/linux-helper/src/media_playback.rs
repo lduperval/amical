@@ -79,7 +79,13 @@ impl MediaPlaybackService {
                             eprintln!("[media] player rejected Pause: {error}");
                             None
                         }
-                        _ => Some(player),
+                        _ => {
+                            // Browser Pause replies can precede the actual state
+                            // change. Wait for the committed pause so an immediate
+                            // stop cannot miss a still-pending browser pause.
+                            let _ = timeout(OPERATION_TIMEOUT, player.wait_for_pause()).await;
+                            Some(player)
+                        }
                     }
                 }),
         )
@@ -192,18 +198,34 @@ impl PausedPlayer {
         // Subscribe before reading the snapshot or sending Pause, avoiding a
         // gap where a track change or user playback action would be missed.
         let changes = properties.receive_signal("PropertiesChanged").await?;
-        let seeks = player.receive_signal("Seeked").await?;
         let snapshot = Snapshot::read(&properties).await?;
         if snapshot.status != "Playing" || !snapshot.can_control || !snapshot.can_pause {
             return Ok(None);
         }
-        let watcher = Watcher::new(changes, seeks, snapshot.track.clone());
+        // Seeked means a position update, not necessarily a user seek:
+        // Firefox/Chromium also emit it when Pause freezes the timeline.
+        // Playback/track changes still suppress resume; a user's seek is
+        // preserved by Play resuming at the player's current position.
+        let watcher = Watcher::new(changes, snapshot.track.clone());
         Ok(Some(Self {
             player,
             properties,
             track: snapshot.track,
             watcher,
         }))
+    }
+
+    async fn wait_for_pause(&self) -> zbus::Result<()> {
+        loop {
+            let snapshot = Snapshot::read(&self.properties).await?;
+            if snapshot.status == "Paused" && snapshot.track == self.track {
+                return Ok(());
+            }
+            if snapshot.status != "Playing" || snapshot.track != self.track {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     async fn resume(&mut self) -> zbus::Result<()> {
@@ -217,6 +239,13 @@ impl PausedPlayer {
         {
             self.player.call::<_, _, ()>("Play", &()).await?;
             eprintln!("[media] resumed a player paused for dictation");
+        } else {
+            eprintln!(
+                "[media] resume skipped: state={}, playback_changed={}, track_changed={}",
+                snapshot.status,
+                !valid,
+                snapshot.track != self.track
+            );
         }
         Ok(())
     }
@@ -228,11 +257,7 @@ struct Watcher {
 }
 
 impl Watcher {
-    fn new(
-        mut changes: SignalStream<'static>,
-        mut seeks: SignalStream<'static>,
-        track: Track,
-    ) -> Self {
+    fn new(mut changes: SignalStream<'static>, track: Track) -> Self {
         let (stop, mut stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
             loop {
@@ -256,7 +281,6 @@ impl Watcher {
                             if Track::from_metadata(&metadata) != track { return false; }
                         }
                     }
-                    _ = seeks.next() => return false,
                     _ = &mut stopped => return true,
                 }
             }

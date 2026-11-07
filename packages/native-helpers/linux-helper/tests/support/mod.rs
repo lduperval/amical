@@ -68,6 +68,9 @@ pub struct State {
     pub can_play: bool,
     pub reject_pause: bool,
     pub slow_pause: bool,
+    pub seeked_on_pause: bool,
+    pub pause_commit_delay_ms: u64,
+    pub position: i64,
     pub pause_calls: usize,
     pub play_calls: usize,
 }
@@ -80,6 +83,9 @@ impl Default for State {
             can_play: true,
             reject_pause: false,
             slow_pause: false,
+            seeked_on_pause: false,
+            pause_commit_delay_ms: 0,
+            position: 123_456_789,
             pause_calls: 0,
             play_calls: 0,
         }
@@ -93,6 +99,26 @@ impl FakePlayer {
         &self,
         #[zbus(signal_context)] context: SignalContext<'_>,
     ) -> zbus::fdo::Result<()> {
+        let commit_delay = self.0.lock().unwrap().pause_commit_delay_ms;
+        if commit_delay > 0 {
+            self.0.lock().unwrap().pause_calls += 1;
+            let state = self.0.clone();
+            let connection = context.connection().clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(commit_delay)).await;
+                let position = {
+                    let mut state = state.lock().unwrap();
+                    state.position += 250_000;
+                    state.position
+                };
+                status_changed(&connection, &state, "Paused").await;
+                connection
+                    .emit_signal(None::<&str>, PATH, PLAYER, "Seeked", &(position,))
+                    .await
+                    .unwrap();
+            });
+            return Ok(());
+        }
         let slow = {
             let mut state = self.0.lock().unwrap();
             state.pause_calls += 1;
@@ -103,6 +129,16 @@ impl FakePlayer {
             state.slow_pause
         };
         self.playback_status_changed(&context).await?;
+        let position_update = {
+            let state = self.0.lock().unwrap();
+            state.seeked_on_pause.then_some(state.position)
+        };
+        if let Some(position) = position_update {
+            context
+                .connection()
+                .emit_signal(None::<&str>, PATH, PLAYER, "Seeked", &(position,))
+                .await?;
+        }
         if slow {
             tokio::time::sleep(Duration::from_millis(650)).await;
         }
@@ -135,6 +171,10 @@ impl FakePlayer {
     #[zbus(property)]
     fn can_play(&self) -> bool {
         self.0.lock().unwrap().can_play
+    }
+    #[zbus(property)]
+    fn position(&self) -> i64 {
+        self.0.lock().unwrap().position
     }
     #[zbus(property)]
     fn metadata(&self) -> Properties {

@@ -170,3 +170,63 @@ async fn a_timed_out_pause_is_bounded_and_can_still_be_restored() {
     media.resume().await;
     assert_eq!(state.lock().unwrap().play_calls, 1);
 }
+
+#[tokio::test]
+async fn browser_position_update_caused_by_pause_must_not_cancel_resume() {
+    let bus = TestBus::new();
+    let state = Arc::new(Mutex::new(State {
+        seeked_on_pause: true,
+        ..State::default()
+    }));
+    let _server = bus
+        .player("org.mpris.MediaPlayer2.browser", state.clone())
+        .await;
+    let mut media = MediaPlaybackService::default();
+    media.pause_on(&bus.connection().await).await;
+    assert_eq!(state.lock().unwrap().status, "Paused");
+    media.resume().await;
+    assert_eq!(state.lock().unwrap().play_calls, 1);
+}
+
+#[tokio::test]
+async fn a_user_seek_is_preserved_without_rewinding_or_suppressing_resume() {
+    let bus = TestBus::new();
+    let state = Arc::new(Mutex::new(State {
+        seeked_on_pause: true,
+        ..State::default()
+    }));
+    let server = bus
+        .player("org.mpris.MediaPlayer2.browser", state.clone())
+        .await;
+    let mut media = MediaPlaybackService::default();
+    media.pause_on(&bus.connection().await).await;
+    let position = {
+        let mut state = state.lock().unwrap();
+        state.position += 10_000_000;
+        state.position
+    };
+    server
+        .emit_signal(None::<&str>, PATH, PLAYER, "Seeked", &(position,))
+        .await
+        .unwrap();
+    media.resume().await;
+    assert_eq!(state.lock().unwrap().play_calls, 1);
+    assert_eq!(state.lock().unwrap().position, position);
+}
+
+#[tokio::test]
+async fn browser_pause_acknowledgement_can_precede_its_actual_position_update() {
+    let bus = TestBus::new();
+    let state = Arc::new(Mutex::new(State {
+        pause_commit_delay_ms: 40,
+        ..State::default()
+    }));
+    let _server = bus
+        .player("org.mpris.MediaPlayer2.browser", state.clone())
+        .await;
+    let mut media = MediaPlaybackService::default();
+    media.pause_on(&bus.connection().await).await;
+    assert_eq!(state.lock().unwrap().status, "Paused");
+    media.resume().await;
+    assert_eq!(state.lock().unwrap().play_calls, 1);
+}

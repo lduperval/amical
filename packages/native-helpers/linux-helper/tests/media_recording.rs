@@ -107,7 +107,10 @@ impl Drop for Helper {
 #[tokio::test]
 async fn recording_pauses_and_stop_or_cancellation_resumes_media() {
     let bus = TestBus::new();
-    let state = Arc::new(Mutex::new(State::default()));
+    let state = Arc::new(Mutex::new(State {
+        seeked_on_pause: true,
+        ..State::default()
+    }));
     let _player = bus
         .player("org.mpris.MediaPlayer2.player", state.clone())
         .await;
