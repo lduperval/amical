@@ -13,6 +13,7 @@ import {
 import { step, up } from "../main/runtime/layer-helpers";
 import { getAmicalClientInfo } from "../utils/http-client";
 import type { SettingsService } from "./settings-service";
+import type { EventMessage } from "posthog-node";
 import type { PostHogClient, SystemInfo } from "./posthog-client";
 import type { AuthState } from "./auth-service";
 import type {
@@ -29,7 +30,9 @@ import type {
   TranscriptionReportedEvent,
   WidgetNotificationShownEvent,
   CloudGrpcFallbackEvent,
-  VocabularyEditWatchCompletedEvent,
+  TranscriptionEditWatchCompletedEvent,
+  StarNudgeEvent,
+  VocabularyLearningCompletedEvent,
   VocabularyAutoUndoneEvent,
 } from "../types/telemetry-events";
 
@@ -90,6 +93,9 @@ const EXCEPTION_GLOBAL_RATE_LIMIT = {
 };
 const EXCEPTION_GLOBAL_KEY = "exceptions-global";
 const RATE_BUCKET_MAX_KEYS = 500;
+/** Cap on events held while the user has not chosen yet (onboarding emits a
+ * few dozen). Events past the cap are dropped. */
+const MAX_PENDING_EVENTS = 200;
 
 interface RateBucket {
   tokens: number;
@@ -126,6 +132,9 @@ function exceptionFingerprint(error: unknown): string {
 export class TelemetryService extends EventEmitter {
   private client: PostHogClient;
   private enabled: boolean = false;
+  /** Non-null while the user has not opted in, opted out, or signed in yet:
+   * events are held here, sent on opt-in or sign-in, dropped on opt-out. */
+  private pendingEvents: EventMessage[] | null = null;
   private initialized: boolean = false;
   private persistedProperties: Record<string, unknown> = {};
   private settingsService: SettingsService;
@@ -143,7 +152,8 @@ export class TelemetryService extends EventEmitter {
    * The service's layer. Registers the early ref (the facade's nullable
    * accessor serves crash telemetry mid-build) and subscribes to the auth
    * events that drive identity: identify on "authenticated" (when the token
-   * carried a subject), reset on "logged-out" (only if identified — the
+   * carried a subject), turn telemetry on at "signed-in" (see handleSignIn),
+   * reset on "logged-out" (only if identified — the
    * reset gate keeps "identity-changed" meaning an ACTUAL change). The
    * subscriptions are removed when the app scope closes, so a torn-down
    * graph's consumers stop reacting to late auth events and repeated builds
@@ -179,6 +189,11 @@ export class TelemetryService extends EventEmitter {
           authState.userInfo.name,
         );
       };
+      const onSignedIn = () => {
+        service.handleSignIn().catch((error) => {
+          logger.main.error("Failed to turn on telemetry after sign-in", error);
+        });
+      };
       const onLoggedOut = () => {
         if (!service.isUserIdentified()) return;
         service.resetUser();
@@ -191,12 +206,14 @@ export class TelemetryService extends EventEmitter {
         );
       };
       authService.on("authenticated", onAuthenticated);
+      authService.on("signed-in", onSignedIn);
       authService.on("logged-out", onLoggedOut);
       authService.on("api-contract-failure", onApiContractFailure);
       yield* Scope.addFinalizer(
         appScope,
         Effect.sync(() => {
           authService.off("authenticated", onAuthenticated);
+          authService.off("signed-in", onSignedIn);
           authService.off("logged-out", onLoggedOut);
           authService.off("api-contract-failure", onApiContractFailure);
         }),
@@ -224,16 +241,18 @@ export class TelemetryService extends EventEmitter {
       return;
     }
 
-    // Sync opt-out state with database settings
+    // Sync opt-out state with database settings. Undefined means the user
+    // has not chosen yet, which counts as off.
     const telemetrySettings = await this.settingsService.getTelemetrySettings();
-    const userTelemetryEnabled = telemetrySettings.enabled !== false;
+    const userTelemetryEnabled = telemetrySettings.enabled === true;
+    this.pendingEvents = telemetrySettings.enabled === undefined ? [] : null;
 
-    if (telemetrySettings.enabled === false) {
-      await this.client.posthog.optOut();
-      logger.main.debug("Opted out of telemetry");
-    } else {
+    if (userTelemetryEnabled) {
       await this.client.posthog.optIn();
       logger.main.debug("Opted into telemetry");
+    } else {
+      await this.client.posthog.optOut();
+      logger.main.debug("Opted out of telemetry");
     }
 
     // ! posthog-node code flow doesn't use register to set super properties
@@ -382,11 +401,13 @@ export class TelemetryService extends EventEmitter {
     this.enabled = true;
     this.emit("enabled-changed", true);
     this.sendIdentifyForCurrentUser();
+    this.flushPendingEvents();
 
     logger.main.info("Telemetry opt-in successful");
   }
 
   async optOut(): Promise<void> {
+    this.pendingEvents = null;
     await this.settingsService.setTelemetrySettings({ enabled: false });
     this.enabled = false;
     this.emit("enabled-changed", false);
@@ -404,6 +425,26 @@ export class TelemetryService extends EventEmitter {
       await this.optIn();
     } else {
       await this.optOut();
+    }
+  }
+
+  /**
+   * A sign-in turns telemetry on: signed-in users have no opt-out. This runs
+   * on a completed sign-in only (AuthService "signed-in"), not when a session
+   * is restored, so a signed-in user who opted out earlier keeps that choice
+   * until they opt in.
+   */
+  async handleSignIn(): Promise<void> {
+    if (!this.enabled) {
+      await this.optIn();
+    }
+  }
+
+  private flushPendingEvents(): void {
+    const pending = this.pendingEvents ?? [];
+    this.pendingEvents = null;
+    for (const message of pending) {
+      this.client.posthog?.capture(message);
     }
   }
 
@@ -527,14 +568,26 @@ export class TelemetryService extends EventEmitter {
 
   private captureEvent(event: string, properties: object = {}): void {
     const distinctId = this.client.distinctId;
-    if (!this.client.posthog || !this.enabled || !distinctId) return;
+    if (!this.client.posthog || !distinctId) return;
+    if (
+      !this.enabled &&
+      (!this.pendingEvents || this.pendingEvents.length >= MAX_PENDING_EVENTS)
+    ) {
+      return;
+    }
     if (!this.allowCapture(`event:${event}`, EVENT_RATE_LIMIT)) return;
 
-    this.client.posthog.capture({
+    const message = {
       distinctId,
       event,
       properties: this.buildEventProperties(properties),
-    });
+    };
+    if (this.enabled) {
+      this.client.posthog.capture(message);
+    } else {
+      // Keep the real event time: the event is sent later, if at all.
+      this.pendingEvents?.push({ ...message, timestamp: new Date() });
+    }
   }
 
   trackAppLaunch(): void {
@@ -646,13 +699,29 @@ export class TelemetryService extends EventEmitter {
   }
 
   // ============================================================================
-  // Vocabulary Learning Events
+  // Star Nudge Events
   // ============================================================================
 
-  trackVocabularyEditWatchCompleted(
-    props: VocabularyEditWatchCompletedEvent,
+  trackStarNudge(props: StarNudgeEvent): void {
+    this.captureEvent("star_nudge", props);
+
+    logger.main.debug("Tracked star nudge", props);
+  }
+
+  // ============================================================================
+  // Edit Watch and Vocabulary Learning Events
+  // ============================================================================
+
+  trackTranscriptionEditWatchCompleted(
+    props: TranscriptionEditWatchCompletedEvent,
   ): void {
-    this.captureEvent("vocabulary_edit_watch_completed", props);
+    this.captureEvent("transcription_edit_watch_completed", props);
+  }
+
+  trackVocabularyLearningCompleted(
+    props: VocabularyLearningCompletedEvent,
+  ): void {
+    this.captureEvent("vocabulary_learning_completed", props);
   }
 
   trackVocabularyAutoUndone(props: VocabularyAutoUndoneEvent): void {

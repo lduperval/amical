@@ -100,7 +100,8 @@
       },
       "microphone": {
         "title": "마이크",
-        "description": "말하는 내용을 Amical이 들을 수 있도록 합니다"
+        "description": "말하는 내용을 Amical이 들을 수 있도록 합니다",
+        "windowsBlocked": "Windows에서 Amical의 마이크 사용을 차단하고 있습니다. 설정을 열고 Amical이 마이크에 액세스하도록 허용하세요. Amical이 여러 개 표시되면 모두 켜세요."
       },
       "accessibility": {
         "title": "손쉬운 사용",
@@ -176,6 +177,12 @@
       "error": {
         "loginStartFailed": "로그인 페이지를 열지 못했습니다. 다시 시도해 주세요."
       }
+    },
+    "telemetry": {
+      "title": "Amical 개선에 참여해 주세요",
+      "subtitle": "사용 데이터와 오류 보고서는 문제를 찾고 Amical을 개선하는 데 도움이 됩니다.",
+      "share": "익명 사용 데이터 공유",
+      "decline": "공유 안 함"
     },
     "download": {
       "title": "모델 준비 중",
@@ -368,7 +375,7 @@
         },
         "quotaExceeded": {
           "title": "요금제 사용 한도 도달",
-          "description": "현재 요금제에서 제공하는 음성 인식 시간을 모두 사용했습니다. 계속 받아쓰려면 요금제를 업그레이드하세요."
+          "description": "현재 요금제에서 제공하는 음성 인식 단어 수를 모두 사용했습니다. 계속 받아쓰려면 요금제를 업그레이드하세요."
         },
         "internalServerError": {
           "title": "서버 오류",
@@ -470,7 +477,58 @@
       "discordAlt": "Discord",
       "logoAlt": "Amical 로고",
       "brand": "Amical",
-      "backToApp": "앱으로 돌아가기"
+      "backToApp": "앱으로 돌아가기",
+      "account": "계정",
+      "signOut": "로그아웃",
+      "signIn": "로그인",
+      "accountLoading": "불러오는 중...",
+      "signInToast": {
+        "opening": "로그인을 위해 브라우저를 여는 중...",
+        "failed": "로그인을 시작하지 못했습니다",
+        "success": "로그인되었습니다"
+      },
+      "signOutFailed": "로그아웃하지 못했습니다",
+      "sessionExpired": {
+        "title": "세션이 만료되었습니다",
+        "description": "계속하려면 <strong>{{account}}</strong>(으)로 다시 로그인하세요.",
+        "existingAccount": "기존 계정",
+        "signInFailed": "로그인하지 못했습니다. 다시 시도해 주세요.",
+        "signOut": "로그아웃",
+        "signingOut": "로그아웃 중…",
+        "signIn": "다시 로그인",
+        "openingBrowser": "브라우저를 여는 중…"
+      },
+      "logoutDialog": {
+        "loggingOutTitle": "로그아웃 중…",
+        "loggingOutDescription": "Amical이 곧 재시작됩니다.",
+        "unsyncedTitle": "동기화되지 않은 변경 사항이 있습니다",
+        "unsyncedDescription": "동기화하지 않고 로그아웃하면 이 변경 사항이 영구적으로 삭제됩니다. 다시 로그인해도 복원되지 않습니다.",
+        "syncingTitle": "저장되지 않은 변경 사항을 동기화하는 중…",
+        "syncingDescription": "최대 15초가 걸릴 수 있습니다. 동기화가 끝나면 로그아웃되고 Amical이 재시작됩니다.",
+        "cancel": "취소",
+        "discardAndLogOut": "변경 사항 삭제 후 로그아웃"
+      },
+      "mobileApp": {
+        "label": "모바일 앱 받기",
+        "title": "휴대폰에서 Amical 사용하기",
+        "description": "휴대폰 카메라로 스캔하여 iPhone 또는 Android용 Amical을 다운로드하세요.",
+        "qrAlt": "Amical 모바일 앱 다운로드용 QR 코드"
+      },
+      "usage": {
+        "label": "클라우드 받아쓰기",
+        "wordsLeft_one": "{{words}}단어 남음",
+        "wordsLeft_other": "{{words}}단어 남음",
+        "noWordsLeft": "남은 단어 없음",
+        "detail": "{{limit}}단어 중 {{used}}단어 사용 - {{date}}에 초기화",
+        "detailRelative": "{{limit}}단어 중 {{used}}단어 사용 - {{when}} 초기화",
+        "upgradeUnlimited": "무제한으로 업그레이드",
+        "openFailed": "브라우저에서 열 수 없습니다"
+      },
+      "starNudge": {
+        "title": "Amical로 {{words}}단어를 받아썼습니다",
+        "body": "Amical은 오픈 소스입니다. GitHub를 사용하신다면 스타를 눌러 주세요. 다른 사람들이 Amical을 찾는 데 도움이 됩니다.",
+        "cta": "GitHub에서 스타 누르기"
+      }
     },
     "search": {
       "buttonLabel": "검색",
@@ -674,7 +732,7 @@
           "description": "릴리스 노트 및 업데이트 보기"
         },
         "github": {
-          "title": "GitHub 저장소",
+          "title": "GitHub에서 Amical에 스타 누르기",
           "description": "소스 코드 확인 및 문제 보고",
           "alt": "GitHub"
         },

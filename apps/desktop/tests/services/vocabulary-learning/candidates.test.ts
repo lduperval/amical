@@ -12,103 +12,86 @@ function candidate(term: string, heard = "x"): Candidate {
 }
 
 describe("extractCandidates", () => {
-  // Golden rows. Steps are given as counts of M / C / D / I.
+  // Golden rows.
   const rows: Array<{
     pasted: string;
     edited: string;
-    steps: { m: number; c: number; d: number; i: number };
     rewrite?: boolean;
     candidates: Candidate[];
   }> = [
     {
       pasted: "open cloud code and run it",
       edited: "open Claude Code and run it",
-      steps: { m: 4, c: 1, d: 1, i: 1 },
       candidates: [{ term: "Claude Code", heard: "cloud code" }],
     },
     {
       pasted: "open cloud code and run it",
       edited: "open Claude Code, and run it",
-      steps: { m: 4, c: 1, d: 1, i: 1 },
       candidates: [{ term: "Claude Code", heard: "cloud code" }],
     },
     {
       pasted: "ping the cube flow team",
       edited: "ping the Kubeflow team",
-      steps: { m: 3, c: 0, d: 2, i: 1 },
       candidates: [{ term: "Kubeflow", heard: "cube flow" }],
     },
     {
       pasted: "send it to john tomorrow",
       edited: "send it to Jon tomorrow",
-      steps: { m: 4, c: 0, d: 1, i: 1 },
       candidates: [{ term: "Jon", heard: "john" }],
     },
     {
       pasted: "we use github",
       edited: "we use GitHub",
-      steps: { m: 2, c: 1, d: 0, i: 0 },
       candidates: [],
     },
     {
       pasted: "send it tomorrow",
       edited: "send it to Priya tomorrow",
-      steps: { m: 3, c: 0, d: 0, i: 2 },
       candidates: [],
     },
     {
       pasted: "ill take look",
       edited: "I'll take a look",
-      steps: { m: 2, c: 0, d: 1, i: 2 },
       candidates: [{ term: "I'll", heard: "ill" }],
     },
     {
       pasted: "can you send me the report by friday",
       edited: "please share the final report with me today",
-      steps: { m: 2, c: 0, d: 6, i: 6 },
-      candidates: [
-        { term: "please share", heard: "can you send me" },
-        { term: "with me today", heard: "by friday" },
-      ],
+      candidates: [{ term: "please share", heard: "can you send me" }],
     },
     {
       pasted: "send the deck to john and the report to mike tomorrow",
       edited: "please call Priya about budget review on Friday",
-      steps: { m: 0, c: 0, d: 11, i: 8 },
       rewrite: true,
       candidates: [],
     },
     {
       pasted: "um so like cloud code is great",
       edited: "Claude Code is great",
-      steps: { m: 2, c: 1, d: 4, i: 1 },
       candidates: [{ term: "Claude Code", heard: "um so like cloud code" }],
     },
     {
       pasted: "open cloud code and run it",
       edited: "open Claude",
-      steps: { m: 1, c: 0, d: 5, i: 1 },
       candidates: [{ term: "Claude", heard: "cloud code and run it" }],
     },
     {
       pasted: "これはkubanetesのせっていです",
       edited: "これはKubernetesのせっていです",
-      steps: { m: 10, c: 0, d: 1, i: 1 },
       candidates: [{ term: "Kubernetes", heard: "kubanetes" }],
     },
   ];
 
   it.each(rows)("$pasted → $edited", (row) => {
     const result = extractCandidates(row.pasted, row.edited);
-    expect(result.steps).toEqual(row.steps);
     expect(result.rewrite).toBe(row.rewrite ?? false);
     expect(result.candidates).toEqual(row.candidates);
   });
 
-  it("drops a run with more than 4 edited tokens", () => {
+  it("drops a run with more than 2 edited tokens", () => {
     const result = extractCandidates(
       "send it to john tomorrow",
-      "send it to the one and only Jon tomorrow",
+      "send it to Jon Smith Jr tomorrow",
     );
     expect(result.rewrite).toBe(false);
     expect(result.candidates).toEqual([]);
@@ -125,12 +108,19 @@ describe("extractCandidates", () => {
     expect(result.candidates).toEqual([]);
   });
 
-  it("keeps a full rewrite of a short dictation (not more than 4 pairs)", () => {
-    const result = extractCandidates("cube flow", "Kubeflow");
+  it.each([
+    ["cube flow", "Kubeflow"],
+    ["open cloud code and run it", "ok thanks see you"],
+  ])("rejects %s → %s: two or more tokens, none kept", (pasted, edited) => {
+    const result = extractCandidates(pasted, edited);
+    expect(result.rewrite).toBe(true);
+    expect(result.candidates).toEqual([]);
+  });
+
+  it("keeps a one-token paste typed over (a name fix)", () => {
+    const result = extractCandidates("Pria", "Priya");
     expect(result.rewrite).toBe(false);
-    expect(result.candidates).toEqual([
-      { term: "Kubeflow", heard: "cube flow" },
-    ]);
+    expect(result.candidates).toEqual([{ term: "Priya", heard: "Pria" }]);
   });
 
   it("joins CJK tokens without spaces", () => {

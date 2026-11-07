@@ -208,9 +208,7 @@ describe("edit tracker scenarios", () => {
     expect(result.endReason).toBe("window_elapsed");
     expect(result.finalRegion).toBe(FIXED);
     expect(result.changed).toBe(true);
-    expect(result.staleFinalState).toBe(false);
     expect(result.keyEventsSeen).toBe(true);
-    expect(result.located).toBe(true);
     expect(result.locateMs).toBe(250);
     expect(result.durationMs).toBe(60_000);
   });
@@ -232,7 +230,6 @@ describe("edit tracker scenarios", () => {
     expect(result.endReason).toBe("superseded");
     expect(h.readTimes.length).toBe(readsBefore + 1);
     expect(result.finalRegion).toBe(FIXED);
-    expect(result.staleFinalState).toBe(false);
   });
 
   it("3 chat with an empty box: fixes a word, presses Enter → sent, learns", async () => {
@@ -263,9 +260,11 @@ describe("edit tracker scenarios", () => {
 
     const result = await h.tracker.result;
     expect(result.endReason).toBe("sent");
-    expect(result.staleFinalState).toBe(true);
     expect(result.changed).toBe(true);
     expect(result.finalRegion).toBeNull();
+    // Metrics still see the last trusted version, marked as editing.
+    expect(result.finalState).toBe("editing");
+    expect(result.region).toBe("open Claude Cod");
   });
 
   it("5 chat: fixes, presses Enter, types the next message before any read → sent, learns the fix", async () => {
@@ -283,7 +282,6 @@ describe("edit tracker scenarios", () => {
     const result = await h.tracker.result;
     expect(result.endReason).toBe("sent");
     expect(result.finalRegion).toBe(FIXED);
-    expect(result.staleFinalState).toBe(false);
   });
 
   it("6 chat: the read after Enter still shows the old text; the app clears later → sent, learns the fix", async () => {
@@ -318,16 +316,48 @@ describe("edit tracker scenarios", () => {
     expect(result.finalRegion).toBe(FIXED);
   });
 
-  it("8 selects the pasted text, presses Backspace, retypes → window_elapsed, learns the retyped term", async () => {
+  it("8 selects the pasted text, presses Backspace → region_deleted, nothing", async () => {
     const h = await locatedChat("ping the cube flow team");
     await h.advanceTo(3300);
     await h.key(MAC_KEYCODES.A, { metaKey: true });
     h.setText("");
     await h.key(MAC_KEYCODES.DELETE);
     await h.advance(50);
+
+    const result = await h.tracker.result;
+    expect(result.endReason).toBe("region_deleted");
+    expect(result.finalState).toBe("discarded");
+    expect(result.region).toBeNull();
+  });
+
+  it.each([
+    ["Backspace", [MAC_KEYCODES.DELETE]],
+    ["Backspace, then Escape", [MAC_KEYCODES.DELETE, MAC_KEYCODES.ESCAPE]],
+  ])(
+    "8b deletes the dictation (%s), the editor shows its placeholder in the value → region_deleted, nothing",
+    async (_keys, keyCodes) => {
+      const h = await locatedChat("can you check the report");
+      await h.advanceTo(3300);
+      await h.key(MAC_KEYCODES.A, { metaKey: true });
+      h.setText("Hi Sam, TAB");
+      for (const keyCode of keyCodes) {
+        await h.key(keyCode);
+      }
+      await h.advance(50);
+
+      const result = await h.tracker.result;
+      expect(result.endReason).toBe("region_deleted");
+      expect(result.finalRegion).toBeNull();
+    },
+  );
+
+  it("8c deletes most of the text with Backspace, retypes the rest → window_elapsed, learns", async () => {
+    const h = await locatedChat("ping the cube flow team");
+    await h.advanceTo(3300);
+    h.setText("ping");
+    await h.key(MAC_KEYCODES.DELETE);
+    await h.advance(50);
     expect(h.resolved).toBeNull();
-    await h.advanceTo(3600);
-    await typeFix(h, "ping");
     await h.advanceTo(4300);
     await typeFix(h, "ping the Kubeflow team");
     await h.advanceTo(60_000);
@@ -418,6 +448,7 @@ describe("edit tracker scenarios", () => {
     expect(result.keyEventsSeen).toBe(false);
     expect(result.changed).toBe(true);
     expect(result.stableFinalState).toBe(false);
+    expect(result.finalState).toBe("unstable");
     expect(result.finalRegion).toBeNull();
   });
 
@@ -431,7 +462,8 @@ describe("edit tracker scenarios", () => {
 
     const result = await h.tracker.result;
     expect(result.endReason).toBe("pasted_text_not_found");
-    expect(result.located).toBe(false);
+    expect(result.finalState).toBe("none");
+    expect(result.region).toBeNull();
     expect(result.locateMs).toBeNull();
     expect(result.finalRegion).toBeNull();
     expect(result.durationMs).toBe(2000);
@@ -601,7 +633,7 @@ describe("edit tracker read status mapping", () => {
     expect(result.endReason).toBe("read_failed");
     expect(result.readErrorCount).toBe(6);
     expect(result.readCount).toBe(8);
-    expect(result.located).toBe(true);
+    expect(result.locateMs).not.toBeNull();
     expect(result.finalRegion).toBeNull();
     expect(result.readMsMax).toBe(9);
   });
@@ -614,7 +646,7 @@ describe("edit tracker read status mapping", () => {
     const result = await h.tracker.result;
     expect(result.endReason).toBe("read_failed");
     expect(result.readErrorCount).toBe(1);
-    expect(result.located).toBe(false);
+    expect(result.finalState).toBe("none");
   });
 });
 
@@ -676,7 +708,6 @@ describe("edit tracker end triggers", () => {
     const result = await h.tracker.result;
     expect(result.endReason).toBe("superseded");
     expect(result.keyEventsSeen).toBe(true);
-    expect(result.staleFinalState).toBe(false);
     expect(result.finalRegion).toBe(FIXED);
   });
 
@@ -799,7 +830,6 @@ describe("edit tracker locate", () => {
     h.tracker.onOtherPaste();
 
     const result = await h.tracker.result;
-    expect(result.located).toBe(true);
     expect(result.finalRegion).toBe("Hallo");
   });
 
@@ -843,7 +873,6 @@ describe("edit tracker locate", () => {
     h.tracker.onOtherPaste();
 
     const result = await h.tracker.result;
-    expect(result.located).toBe(true);
     expect(result.locateMs).toBe(1000);
   });
 
@@ -861,7 +890,6 @@ describe("edit tracker locate", () => {
     h.tracker.onOtherPaste();
 
     const result = await h.tracker.result;
-    expect(result.located).toBe(true);
     expect(result.finalRegion).toBe("line one\nline 2");
   });
 

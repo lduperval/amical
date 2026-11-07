@@ -50,7 +50,7 @@ describe("migrateToV15", () => {
   });
 
   it("remains registered before the current migration", () => {
-    expect(CURRENT_SETTINGS_VERSION).toBe(16);
+    expect(CURRENT_SETTINGS_VERSION).toBe(17);
     expect(
       migrateSettings(
         {

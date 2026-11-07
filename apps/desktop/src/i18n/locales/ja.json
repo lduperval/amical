@@ -100,7 +100,8 @@
       },
       "microphone": {
         "title": "マイク",
-        "description": "Amicalがディクテーションを聞き取るために必要です"
+        "description": "Amicalがディクテーションを聞き取るために必要です",
+        "windowsBlocked": "WindowsがAmicalのマイク使用をブロックしています。設定を開いて、Amicalにマイクへのアクセスを許可してください。Amicalが複数表示されている場合は、すべてオンにしてください。"
       },
       "accessibility": {
         "title": "アクセシビリティ",
@@ -176,6 +177,12 @@
       "error": {
         "loginStartFailed": "ログインを開けませんでした。もう一度お試しください。"
       }
+    },
+    "telemetry": {
+      "title": "Amicalの改善にご協力ください",
+      "subtitle": "使用データとクラッシュレポートは、問題の発見とAmicalの改善に役立ちます。",
+      "share": "匿名の使用データを共有する",
+      "decline": "共有しない"
     },
     "download": {
       "title": "モデルを準備しています",
@@ -470,7 +477,58 @@
       "discordAlt": "Discord",
       "logoAlt": "Amical ロゴ",
       "brand": "Amical",
-      "backToApp": "アプリに戻る"
+      "backToApp": "アプリに戻る",
+      "account": "アカウント",
+      "signOut": "ログアウト",
+      "signIn": "ログイン",
+      "accountLoading": "読み込み中...",
+      "signInToast": {
+        "opening": "ログインのためにブラウザを開いています...",
+        "failed": "ログインの開始に失敗しました",
+        "success": "ログインしました"
+      },
+      "signOutFailed": "ログアウトに失敗しました",
+      "sessionExpired": {
+        "title": "セッションの有効期限が切れました",
+        "description": "続行するには、<strong>{{account}}</strong>で再度ログインしてください。",
+        "existingAccount": "既存のアカウント",
+        "signInFailed": "ログインに失敗しました。もう一度お試しください。",
+        "signOut": "ログアウト",
+        "signingOut": "ログアウト中…",
+        "signIn": "再度ログイン",
+        "openingBrowser": "ブラウザを開いています…"
+      },
+      "logoutDialog": {
+        "loggingOutTitle": "ログアウト中…",
+        "loggingOutDescription": "Amicalはまもなく再起動します。",
+        "unsyncedTitle": "未同期の変更があります",
+        "unsyncedDescription": "同期せずにログアウトすると、これらの変更は完全に破棄されます。再度ログインしても復元されません。",
+        "syncingTitle": "未保存の変更を同期しています…",
+        "syncingDescription": "最大15秒かかる場合があります。同期が完了すると、Amicalはログアウトして再起動します。",
+        "cancel": "キャンセル",
+        "discardAndLogOut": "変更を破棄してログアウト"
+      },
+      "mobileApp": {
+        "label": "モバイルアプリを入手",
+        "title": "スマートフォンでAmicalを使う",
+        "description": "スマートフォンのカメラでスキャンして、iPhoneまたはAndroid版のAmicalをダウンロードしてください。",
+        "qrAlt": "AmicalモバイルアプリをダウンロードするためのQRコード"
+      },
+      "usage": {
+        "label": "クラウド音声入力",
+        "wordsLeft_one": "残り{{words}}語",
+        "wordsLeft_other": "残り{{words}}語",
+        "noWordsLeft": "残り語数なし",
+        "detail": "{{limit}}語中{{used}}語を使用 - {{date}}にリセット",
+        "detailRelative": "{{limit}}語中{{used}}語を使用 - {{when}}にリセット",
+        "upgradeUnlimited": "無制限にアップグレード",
+        "openFailed": "ブラウザで開けませんでした"
+      },
+      "starNudge": {
+        "title": "Amicalで{{words}}語を音声入力しました",
+        "body": "Amicalはオープンソースです。GitHubをご利用でしたら、スターを付けていただくと他の方がAmicalを見つけやすくなります。",
+        "cta": "GitHubでスターする"
+      }
     },
     "search": {
       "buttonLabel": "検索",
@@ -674,7 +732,7 @@
           "description": "リリースノートとアップデートを表示"
         },
         "github": {
-          "title": "GitHubリポジトリ",
+          "title": "GitHubでAmicalにスターを付ける",
           "description": "ソースコードと課題管理",
           "alt": "GitHub"
         },
@@ -807,9 +865,9 @@
         "cloudOptionLabel": "Amical Cloud（Amical）",
         "disabledTooltip": "フォーマットを有効にするには、言語モデルを同期するか、Amical Cloud文字起こしを選択してください。",
         "disabledReason": {
-          "cloudAndSignIn": "Amical Cloud文字起こしとサインインが必要です",
+          "cloudAndSignIn": "Amical Cloud文字起こしとログインが必要です",
           "cloud": "Amical Cloud文字起こしが必要です",
-          "signIn": "サインインが必要です"
+          "signIn": "ログインが必要です"
         },
         "manageLanguageModels": "言語モデルを管理",
         "modelLabel": "フォーマットモデル",
@@ -817,8 +875,8 @@
         "modelPlaceholder": "モデルを選択...",
         "requiresCloudSpeech": "Amical Cloud文字起こしが必要です。",
         "switchSpeechModel": "音声モデルを切り替え",
-        "signInCloud": "Amical Cloudフォーマットを使用するにはサインインしてください。",
-        "signIn": "サインイン",
+        "signInCloud": "Amical Cloudフォーマットを使用するにはログインしてください。",
+        "signIn": "ログイン",
         "cloudReady": "Amical Cloudフォーマットを使用中。",
         "noLanguageModels": "フォーマットは実行されません - 言語モデルがありません。",
         "syncLanguageModels": "言語モデルを同期",
@@ -1190,7 +1248,7 @@
         "cloudFormatting": {
           "badge": "フォーマット対応",
           "tooltip": "このモデルを選択すると、クラウドフォーマットが利用できます。",
-          "signInTitle": "クラウドモデルを使用するにはサインインしてください"
+          "signInTitle": "クラウドモデルを使用するにはログインしてください"
         },
         "actions": {
           "downloadTitle": "クリックしてダウンロード",
@@ -1206,13 +1264,13 @@
           "confirm": "削除"
         },
         "loginDialog": {
-          "title": "サインインが必要です",
-          "description": "Amical Cloudの文字起こしを使用するには、Amicalアカウントでサインインする必要があります。これにより、安全で高精度なクラウドベースの文字起こしが利用できます。",
-          "browserNotice": "「サインイン」をクリックすると、ブラウザにリダイレクトされてログインプロセスを完了します。",
+          "title": "ログインが必要です",
+          "description": "Amical Cloudの文字起こしを使用するには、Amicalアカウントでログインする必要があります。これにより、安全で高精度なクラウドベースの文字起こしが利用できます。",
+          "browserNotice": "「ログイン」をクリックすると、ブラウザにリダイレクトされてログインプロセスを完了します。",
           "cloudBenefit": "高速で高精度なクラウド文字起こし",
           "cancel": "キャンセル",
           "openingBrowser": "ブラウザを開いています...",
-          "signIn": "サインイン"
+          "signIn": "ログイン"
         },
         "toast": {
           "downloadStartFailed": "ダウンロードの開始に失敗しました",

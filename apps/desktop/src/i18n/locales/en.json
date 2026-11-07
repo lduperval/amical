@@ -100,7 +100,8 @@
       },
       "microphone": {
         "title": "Microphone",
-        "description": "So Amical can hear your dictation"
+        "description": "So Amical can hear your dictation",
+        "windowsBlocked": "Windows blocks Amical from using the microphone. Open settings and allow microphone access for Amical. If Amical is listed more than once, turn on each entry."
       },
       "accessibility": {
         "title": "Accessibility",
@@ -173,6 +174,12 @@
       "error": {
         "loginStartFailed": "Couldn't open the sign-in page. Please try again."
       }
+    },
+    "telemetry": {
+      "title": "Help improve Amical",
+      "subtitle": "Usage data and crash reports help us find problems and make Amical better.",
+      "share": "Share anonymous usage data",
+      "decline": "Don't share"
     },
     "download": {
       "title": "Getting your model ready",
@@ -322,7 +329,7 @@
         "recordingAutoStopped": "Max dictation duration reached. Start a new dictation if needed."
       },
       "action": {
-        "logIn": "Log In",
+        "logIn": "Sign In",
         "support": "Support",
         "viewUsage": "View Usage",
         "viewHistory": "View History",
@@ -356,8 +363,8 @@
       },
       "errorCode": {
         "authRequired": {
-          "title": "Login required",
-          "description": "Please log in to use cloud transcription"
+          "title": "Sign-in required",
+          "description": "Please sign in to use cloud transcription"
         },
         "rateLimitExceeded": {
           "title": "Rate limit exceeded",
@@ -365,7 +372,7 @@
         },
         "quotaExceeded": {
           "title": "Plan limit reached",
-          "description": "You've used all the transcription minutes on your current plan. Upgrade to keep dictating."
+          "description": "You've used all the transcription words on your current plan. Upgrade to keep dictating."
         },
         "internalServerError": {
           "title": "Server error",
@@ -467,7 +474,58 @@
       "discordAlt": "Discord",
       "logoAlt": "Amical Logo",
       "brand": "Amical",
-      "backToApp": "Back to app"
+      "backToApp": "Back to app",
+      "account": "Account",
+      "signOut": "Sign Out",
+      "signIn": "Sign In",
+      "accountLoading": "Loading...",
+      "signInToast": {
+        "opening": "Opening browser for sign in...",
+        "failed": "Failed to initiate sign-in",
+        "success": "Signed in successfully"
+      },
+      "signOutFailed": "Failed to sign out",
+      "sessionExpired": {
+        "title": "Your session expired",
+        "description": "Sign in again with <strong>{{account}}</strong> to continue.",
+        "existingAccount": "your existing account",
+        "signInFailed": "Could not sign in. Please try again.",
+        "signOut": "Sign out",
+        "signingOut": "Signing out…",
+        "signIn": "Sign in again",
+        "openingBrowser": "Opening browser…"
+      },
+      "logoutDialog": {
+        "loggingOutTitle": "Signing out…",
+        "loggingOutDescription": "Amical will restart shortly.",
+        "unsyncedTitle": "You have unsynced changes",
+        "unsyncedDescription": "Signing out without syncing will permanently discard these changes. They won’t be restored when you sign back in.",
+        "syncingTitle": "Syncing unsaved changes…",
+        "syncingDescription": "This can take up to 15 seconds. Amical will sign out and restart when syncing finishes.",
+        "cancel": "Cancel",
+        "discardAndLogOut": "Discard changes and sign out"
+      },
+      "mobileApp": {
+        "label": "Get the mobile app",
+        "title": "Get Amical on your phone",
+        "description": "Scan with your phone's camera to download Amical for iPhone or Android.",
+        "qrAlt": "QR code to download the Amical mobile app"
+      },
+      "usage": {
+        "label": "Cloud dictation",
+        "wordsLeft_one": "{{words}} word left",
+        "wordsLeft_other": "{{words}} words left",
+        "noWordsLeft": "No words left",
+        "detail": "{{used}} of {{limit}} words used - resets {{date}}",
+        "detailRelative": "{{used}} of {{limit}} words used - resets {{when}}",
+        "upgradeUnlimited": "Upgrade to unlimited",
+        "openFailed": "Couldn't open in browser"
+      },
+      "starNudge": {
+        "title": "You've dictated {{words}} words with Amical",
+        "body": "Amical is open source. If you use GitHub, a star helps other people find it.",
+        "cta": "Star on GitHub"
+      }
     },
     "search": {
       "buttonLabel": "Search",
@@ -671,7 +729,7 @@
           "description": "View release notes and updates"
         },
         "github": {
-          "title": "GitHub Repository",
+          "title": "Star Amical on GitHub",
           "description": "Source code and issue tracking",
           "alt": "GitHub"
         },
@@ -821,8 +879,8 @@
         "syncLanguageModels": "Sync language models",
         "toast": {
           "saveFailed": "Failed to save formatting settings. Please try again.",
-          "loginInBrowser": "Complete login in your browser",
-          "loginStartFailed": "Failed to start login process"
+          "loginInBrowser": "Complete sign-in in your browser",
+          "loginStartFailed": "Failed to start sign-in process"
         }
       }
     },
@@ -1205,7 +1263,7 @@
         "loginDialog": {
           "title": "Sign In Required",
           "description": "To use Amical Cloud transcription, you need to sign in with your Amical account. This enables secure cloud-based transcription with high accuracy.",
-          "browserNotice": "After clicking \"Sign In\", you'll be redirected to your browser to complete the login process.",
+          "browserNotice": "After clicking \"Sign In\", you'll be redirected to your browser to complete the sign-in process.",
           "cloudBenefit": "Fast, accurate cloud transcription",
           "cancel": "Cancel",
           "openingBrowser": "Opening Browser...",
@@ -1217,10 +1275,10 @@
           "deleteFailed": "Failed to delete model",
           "cloudSelected": "Amical Cloud selected. Cloud formatting enabled.",
           "selectFailed": "Failed to select model",
-          "loginInBrowser": "Please complete login in your browser",
-          "loginStartFailed": "Failed to start login process",
+          "loginInBrowser": "Please complete sign-in in your browser",
+          "loginStartFailed": "Failed to start sign-in process",
           "downloadFailed": "Download failed: {{message}}",
-          "loginSuccess": "Login successful!"
+          "loginSuccess": "Sign-in successful!"
         }
       }
     }

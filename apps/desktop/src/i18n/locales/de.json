@@ -100,7 +100,8 @@
       },
       "microphone": {
         "title": "Mikrofon",
-        "description": "Damit Amical dein Diktat hören kann"
+        "description": "Damit Amical dein Diktat hören kann",
+        "windowsBlocked": "Windows blockiert den Mikrofonzugriff für Amical. Öffne die Einstellungen und erlaube Amical den Zugriff auf das Mikrofon. Wenn Amical mehrmals aufgeführt ist, schalte jeden Eintrag ein."
       },
       "accessibility": {
         "title": "Bedienungshilfen",
@@ -176,6 +177,12 @@
       "error": {
         "loginStartFailed": "Anmeldung konnte nicht geöffnet werden. Bitte versuche es erneut."
       }
+    },
+    "telemetry": {
+      "title": "Hilf, Amical zu verbessern",
+      "subtitle": "Nutzungsdaten und Absturzberichte helfen uns, Probleme zu finden und Amical zu verbessern.",
+      "share": "Anonyme Nutzungsdaten teilen",
+      "decline": "Nicht teilen"
     },
     "download": {
       "title": "Dein Modell wird vorbereitet",
@@ -368,7 +375,7 @@
         },
         "quotaExceeded": {
           "title": "Tariflimit erreicht",
-          "description": "Du hast alle Transkriptionsminuten deines aktuellen Tarifs aufgebraucht. Führe ein Upgrade durch, um weiter zu diktieren."
+          "description": "Du hast alle Transkriptionswörter deines aktuellen Tarifs aufgebraucht. Führe ein Upgrade durch, um weiter zu diktieren."
         },
         "internalServerError": {
           "title": "Serverfehler",
@@ -470,7 +477,58 @@
       "discordAlt": "Discord",
       "logoAlt": "Amical-Logo",
       "brand": "Amical",
-      "backToApp": "Zurück zur App"
+      "backToApp": "Zurück zur App",
+      "account": "Konto",
+      "signOut": "Abmelden",
+      "signIn": "Anmelden",
+      "accountLoading": "Wird geladen...",
+      "signInToast": {
+        "opening": "Browser wird zur Anmeldung geöffnet...",
+        "failed": "Anmeldung konnte nicht gestartet werden",
+        "success": "Erfolgreich angemeldet"
+      },
+      "signOutFailed": "Abmeldung konnte nicht abgeschlossen werden",
+      "sessionExpired": {
+        "title": "Deine Sitzung ist abgelaufen",
+        "description": "Melde dich erneut mit <strong>{{account}}</strong> an, um fortzufahren.",
+        "existingAccount": "deinem bestehenden Konto",
+        "signInFailed": "Anmeldung fehlgeschlagen. Bitte versuche es erneut.",
+        "signOut": "Abmelden",
+        "signingOut": "Wird abgemeldet…",
+        "signIn": "Erneut anmelden",
+        "openingBrowser": "Browser wird geöffnet…"
+      },
+      "logoutDialog": {
+        "loggingOutTitle": "Wird abgemeldet…",
+        "loggingOutDescription": "Amical wird gleich neu gestartet.",
+        "unsyncedTitle": "Du hast nicht synchronisierte Änderungen",
+        "unsyncedDescription": "Wenn du dich ohne Synchronisierung abmeldest, werden diese Änderungen endgültig verworfen. Sie werden nicht wiederhergestellt, wenn du dich erneut anmeldest.",
+        "syncingTitle": "Nicht gespeicherte Änderungen werden synchronisiert…",
+        "syncingDescription": "Das kann bis zu 15 Sekunden dauern. Amical meldet dich ab und startet neu, sobald die Synchronisierung abgeschlossen ist.",
+        "cancel": "Abbrechen",
+        "discardAndLogOut": "Änderungen verwerfen und abmelden"
+      },
+      "mobileApp": {
+        "label": "Mobile App herunterladen",
+        "title": "Hol dir Amical aufs Handy",
+        "description": "Scanne den Code mit deiner Handykamera, um Amical für iPhone oder Android herunterzuladen.",
+        "qrAlt": "QR-Code zum Herunterladen der mobilen Amical-App"
+      },
+      "usage": {
+        "label": "Cloud-Diktat",
+        "wordsLeft_one": "{{words}} Wort übrig",
+        "wordsLeft_other": "{{words}} Wörter übrig",
+        "noWordsLeft": "Keine Wörter übrig",
+        "detail": "{{used}} von {{limit}} Wörtern genutzt – Zurücksetzung am {{date}}",
+        "detailRelative": "{{used}} von {{limit}} Wörtern genutzt – wird {{when}} zurückgesetzt",
+        "upgradeUnlimited": "Upgrade auf unbegrenzt",
+        "openFailed": "Konnte nicht im Browser geöffnet werden"
+      },
+      "starNudge": {
+        "title": "Du hast {{words}} Wörter mit Amical diktiert",
+        "body": "Amical ist Open Source. Wenn du GitHub nutzt, hilft ein Stern anderen, Amical zu finden.",
+        "cta": "GitHub-Stern geben"
+      }
     },
     "search": {
       "buttonLabel": "Suchen",
@@ -674,7 +732,7 @@
           "description": "Versionshinweise und Updates anzeigen"
         },
         "github": {
-          "title": "GitHub-Repository",
+          "title": "Amical auf GitHub einen Stern geben",
           "description": "Quellcode und Issue-Tracking",
           "alt": "GitHub"
         },

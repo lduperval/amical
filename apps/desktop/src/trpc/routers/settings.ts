@@ -988,7 +988,7 @@ export const settingsRouter = createRouter({
       if (logger) {
         logger.main.error("Error getting telemetry settings:", error);
       }
-      return { enabled: true };
+      return { enabled: false };
     }
   }),
 

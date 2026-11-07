@@ -14,6 +14,7 @@ import { setPassThroughReason } from "../pass-through";
 export const useWidgetNotifications = (recordingState: RecordingState) => {
   const navigateMainWindow = api.widget.navigateMainWindow.useMutation();
   const undoLearnedVocabulary = api.vocabulary.undoLearned.useMutation();
+  const openWebSession = api.auth.openWebSession.useMutation();
   const trackEvent = api.telemetry.trackEvent.useMutation();
   const activeToastIdsRef = useRef<Set<string | number>>(new Set());
   const [hasVisibleNotification, setHasVisibleNotification] = useState(false);
@@ -29,6 +30,8 @@ export const useWidgetNotifications = (recordingState: RecordingState) => {
   const handleActionClick = async (action: WidgetNotificationAction) => {
     if (action.command?.kind === "undoLearnedVocabulary") {
       undoLearnedVocabulary.mutate({ entries: action.command.entries });
+    } else if (action.command?.kind === "openWebSession") {
+      openWebSession.mutate({ returnPath: action.command.returnPath });
     } else if (action.navigateTo) {
       navigateMainWindow.mutate({ route: action.navigateTo });
     } else if (action.externalUrl) {
