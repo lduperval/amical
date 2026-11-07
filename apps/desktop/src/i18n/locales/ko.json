@@ -560,7 +560,8 @@
       },
       "muteSystemAudio": {
         "label": "녹음 중 시스템 오디오 음소거",
-        "description": "마이크로 녹음하는 동안 컴퓨터에서 나오는 소리를 끕니다"
+        "description": "마이크로 녹음하는 동안 컴퓨터에서 나오는 소리를 끕니다",
+        "mediaDescription": "재생 중인 미디어를 일시 중지하고 녹음 후 다시 재생하며, 다른 시스템 오디오는 음소거합니다."
       },
       "muteDictationSounds": {
         "label": "받아쓰기 소리 음소거",

@@ -560,7 +560,8 @@
       },
       "muteSystemAudio": {
         "label": "System-Audio während der Aufnahme stummschalten",
-        "description": "Systemausgabe stummschalten, während Mikrofon-Audio aufgenommen wird"
+        "description": "Systemausgabe stummschalten, während Mikrofon-Audio aufgenommen wird",
+        "mediaDescription": "Laufende Medien pausieren und nach der Aufnahme fortsetzen; andere Systemtöne stummschalten."
       },
       "muteDictationSounds": {
         "label": "Diktiergeräusche stummschalten",

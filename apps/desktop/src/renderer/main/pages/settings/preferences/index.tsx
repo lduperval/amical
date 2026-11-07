@@ -242,7 +242,11 @@ export default function PreferencesSettingsPage() {
                   {t("settings.preferences.muteSystemAudio.label")}
                 </Label>
                 <p className="text-xs text-muted-foreground">
-                  {t("settings.preferences.muteSystemAudio.description")}
+                  {t(
+                    isMac
+                      ? "settings.preferences.muteSystemAudio.description"
+                      : "settings.preferences.muteSystemAudio.mediaDescription",
+                  )}
                 </p>
               </div>
               <Switch

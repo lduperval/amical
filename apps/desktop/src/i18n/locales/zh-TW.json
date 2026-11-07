@@ -560,7 +560,8 @@
       },
       "muteSystemAudio": {
         "label": "錄音時將系統音量靜音",
-        "description": "在擷取麥克風音訊時，暫停系統輸出"
+        "description": "在擷取麥克風音訊時，暫停系統輸出",
+        "mediaDescription": "暫停正在播放的媒體，並在錄音結束後繼續播放；將其他系統音訊靜音。"
       },
       "muteDictationSounds": {
         "label": "將聽寫音效靜音",

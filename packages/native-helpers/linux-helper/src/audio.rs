@@ -1,8 +1,8 @@
-//! Recording chrome: start/stop sounds and system-audio muting.
+//! Recording chrome: start/stop sounds, media pause/resume and system-audio muting.
 //!
 //! Audio *capture* happens in the Electron app itself (as on macOS/Windows —
 //! note the start/stopRecording schemas carry no file path); this helper only
-//! plays the feedback sounds and mutes/restores the system output sink.
+//! plays feedback sounds, pauses/resumes MPRIS players and mutes/restores output.
 //!
 //! Implemented by shelling out to `paplay`/`pactl`, which talk to PulseAudio
 //! or PipeWire (via pipewire-pulse) alike — avoiding native audio library
@@ -12,6 +12,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use linux_helper::media_playback::MediaPlaybackService;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
@@ -26,9 +27,16 @@ const SOUND_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct AudioService {
     /// Directory holding the unpacked sound files for paplay.
     sounds_dir: Option<tempfile::TempDir>,
-    /// Sink mute state before we muted it, captured by startRecording so
-    /// stopRecording can put it back instead of blindly unmuting.
-    previous_mute: Mutex<Option<bool>>,
+    // Serialize recording transitions; rapid successor recordings can overlap
+    // the previous session's cleanup in the desktop lifecycle.
+    recording: Mutex<RecordingState>,
+}
+
+#[derive(Default)]
+struct RecordingState {
+    active: usize,
+    previous_mute: Option<bool>,
+    media: MediaPlaybackService,
 }
 
 impl AudioService {
@@ -42,7 +50,7 @@ impl AudioService {
         };
         Self {
             sounds_dir,
-            previous_mute: Mutex::new(None),
+            recording: Mutex::new(RecordingState::default()),
         }
     }
 
@@ -95,11 +103,17 @@ impl AudioService {
     }
 
     async fn get_sink_mute(&self) -> Option<bool> {
-        let output = Command::new("pactl")
-            .args(["get-sink-mute", DEFAULT_SINK])
-            .output()
-            .await
-            .ok()?;
+        let output = tokio::time::timeout(
+            Duration::from_millis(500),
+            Command::new("pactl")
+                .args(["get-sink-mute", DEFAULT_SINK])
+                .env("LC_ALL", "C")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .ok()?
+        .ok()?;
         if !output.status.success() {
             return None;
         }
@@ -108,36 +122,41 @@ impl AudioService {
     }
 
     async fn set_sink_mute(&self, mute: bool) -> bool {
-        match Command::new("pactl")
-            .args(["set-sink-mute", DEFAULT_SINK, if mute { "1" } else { "0" }])
-            .status()
-            .await
+        match tokio::time::timeout(
+            Duration::from_millis(500),
+            Command::new("pactl")
+                .args(["set-sink-mute", DEFAULT_SINK, if mute { "1" } else { "0" }])
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await
         {
-            Ok(status) if status.success() => true,
-            Ok(status) => {
-                eprintln!("[audio] pactl set-sink-mute exited with {status}");
-                false
-            }
-            Err(e) => {
-                eprintln!("[audio] could not run pactl: {e}");
+            Ok(Ok(status)) if status.success() => true,
+            result => {
+                eprintln!("[audio] could not update sink mute state: {result:?}");
                 false
             }
         }
     }
 
     pub async fn start_recording(&self, params: StartRecordingParams) -> SuccessMessageResult {
+        let mut state = self.recording.lock().await;
+        let first = state.active == 0;
+        state.active += 1;
         let mute_sounds = params.mute_sounds.unwrap_or(false);
         if !mute_sounds {
             self.play_sound("rec-start", true).await;
         }
 
         let mut success = true;
-        if params.mute_system_audio {
+        if first && params.mute_system_audio {
             let previous = self.get_sink_mute().await;
             success = self.set_sink_mute(true).await;
             if success {
-                *self.previous_mute.lock().await = previous;
+                state.previous_mute = Some(previous.unwrap_or(false));
             }
+            // Media control remains independent of whether output muting worked.
+            state.media.pause().await;
         }
 
         SuccessMessageResult {
@@ -151,20 +170,16 @@ impl AudioService {
     }
 
     pub async fn stop_recording(&self, params: StopRecordingParams) -> SuccessMessageResult {
-        let mute_sounds = params.mute_sounds.unwrap_or(false);
-
-        let mut success = true;
-        if params.was_muted {
-            // Restore the pre-recording state; default to unmuting when the
-            // helper restarted in between and lost it.
-            let previous = self.previous_mute.lock().await.take().unwrap_or(false);
-            success = self.set_sink_mute(previous).await;
-        }
-
-        if !mute_sounds {
+        let mut state = self.recording.lock().await;
+        state.active = state.active.saturating_sub(1);
+        let success = if state.active == 0 {
+            self.restore(&mut state, params.was_muted).await
+        } else {
+            true
+        };
+        if !params.mute_sounds.unwrap_or(false) {
             self.play_sound("rec-stop", false).await;
         }
-
         SuccessMessageResult {
             success,
             message: Some(if success {
@@ -173,5 +188,22 @@ impl AudioService {
                 "Failed to restore system audio".into()
             }),
         }
+    }
+
+    async fn restore(&self, state: &mut RecordingState, was_muted: bool) -> bool {
+        let previous = state.previous_mute.take().or(was_muted.then_some(false));
+        let success = match previous {
+            Some(previous) => self.set_sink_mute(previous).await,
+            None => true,
+        };
+        // Also resume after cancellation, a mute failure, or a restore failure.
+        state.media.resume().await;
+        success
+    }
+
+    pub async fn shutdown(&self) {
+        let mut state = self.recording.lock().await;
+        state.active = 0;
+        self.restore(&mut state, false).await;
     }
 }

@@ -560,7 +560,8 @@
       },
       "muteSystemAudio": {
         "label": "録音中にシステム音声をミュート",
-        "description": "マイク録音中にシステムの出力音声を消音"
+        "description": "マイク録音中にシステムの出力音声を消音",
+        "mediaDescription": "再生中のメディアを一時停止し、録音後に再開します。その他のシステム音はミュートします。"
       },
       "muteDictationSounds": {
         "label": "ディクテーション音をミュート",

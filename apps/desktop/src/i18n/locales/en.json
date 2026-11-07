@@ -557,7 +557,8 @@
       },
       "muteSystemAudio": {
         "label": "Mute system audio during recording",
-        "description": "Silence system output while capturing microphone audio"
+        "description": "Silence system output while capturing microphone audio",
+        "mediaDescription": "Pause playing media and resume it after recording; silence other system audio."
       },
       "muteDictationSounds": {
         "label": "Mute dictation sounds",

@@ -35,6 +35,9 @@ pub mod gnome_ext;
 /// so the clipboard and the floating widget can use it whenever it is installed.
 pub mod gnome_shell;
 
+/// Pause and restore controllable media players during dictation via MPRIS.
+pub mod media_playback;
+
 /// User-facing explanation when the GNOME Shell extension is required but
 /// not running. Shared by the injector, the status RPC and widget placement.
 pub const fn gnome_ext_missing_message() -> &'static str {

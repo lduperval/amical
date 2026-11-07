@@ -21,6 +21,40 @@ cached build for one feature cannot be mistaken for another. Linux packaging
 builds and verifies the `uinput` variant explicitly. See `../../../BUILD.md`
 for device permissions and testing.
 
+## Pause media during dictation
+
+With **Mute system audio during recording** enabled, the helper pauses active
+MPRIS players and resumes only those it paused when recording ends or is
+cancelled. Media resumes from its paused position. Already paused players stay
+paused, and a playback/track change, seek, closed player, or unavailable Play
+control cancels automatic resume. The helper also restores playback when its
+parent closes the RPC input normally.
+
+This talks directly to the session D-Bus using the existing Rust dependencies;
+`playerctl` and the Amical GNOME extension are not required. Browsers must expose
+their tab through desktop media controls. System-audio muting remains as a
+fallback for other sounds or unsupported players. Disable the existing audio
+mute preference to disable both muting and media control.
+
+Media controls are best effort with bounded waits. A live stream may return to
+the live position, and a forced kill cannot guarantee playback restoration.
+Redundant user Pause commands may be invisible when the player is already
+paused; only changes reported by the player can suppress automatic resume.
+
+The native tests launch fake players on private D-Bus sessions and replace
+`pactl`, so they do not control the user's players or system volume:
+
+```sh
+cargo test --features uinput --offline
+```
+
+The ignored physical virtual-keyboard test is separate. To verify real playback,
+play a browser video, dictate for a few seconds, and finish or cancel: playback
+should pause and resume at the same position. Repeat with the video already
+paused, with a manual track change, and with the preference disabled.
+
+MPRIS API: https://specifications.freedesktop.org/mpris/latest/Player_Interface.html
+
 The uinput backend creates a persistent virtual keyboard and waits for physical
 modifiers to be released before pasting. It uses Shift+Insert with both clipboard
 selections to support standard text fields and terminals. Recording shortcuts

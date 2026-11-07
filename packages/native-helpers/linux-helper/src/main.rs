@@ -133,12 +133,14 @@ async fn main() {
 
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
+    let mut requests = tokio::task::JoinSet::new();
     while let Ok(Some(line)) = lines.next_line().await {
         if line.trim().is_empty() {
             continue;
         }
+        while requests.try_join_next().is_some() {}
         let helper = helper.clone();
-        tokio::spawn(async move {
+        requests.spawn(async move {
             let response = match serde_json::from_str::<RpcRequest>(&line) {
                 Ok(request) => handle_request(&helper, request).await,
                 Err(e) => {
@@ -153,7 +155,9 @@ async fn main() {
     }
 
     // stdin closed: the desktop is gone, shut down.
-    eprintln!("[main] stdin closed, exiting");
+    eprintln!("[main] stdin closed, restoring playback and exiting");
+    while requests.join_next().await.is_some() {}
+    helper.audio.shutdown().await;
     drop(helper);
     drop(out_tx);
     let _ = writer.await;

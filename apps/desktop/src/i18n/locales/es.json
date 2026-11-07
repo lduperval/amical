@@ -560,7 +560,8 @@
       },
       "muteSystemAudio": {
         "label": "Silenciar audio del sistema durante la grabación",
-        "description": "Silenciar la salida del sistema mientras se captura audio del micrófono"
+        "description": "Silenciar la salida del sistema mientras se captura audio del micrófono",
+        "mediaDescription": "Pausar los medios en reproducción y reanudarlos al terminar la grabación; silenciar el resto del audio del sistema."
       },
       "muteDictationSounds": {
         "label": "Silenciar sonidos de dictado",
