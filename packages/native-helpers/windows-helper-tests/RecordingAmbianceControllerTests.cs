@@ -187,6 +187,66 @@ public class RecordingAmbianceControllerTests
         Assert.That(playCount, Is.EqualTo(2));
     }
 
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task MediaResumeRunsEvenWhenSystemMuteFailed(bool muteSucceeded)
+    {
+        var events = new ConcurrentQueue<string>();
+        var controller = new RecordingAmbianceController(
+            sound => { events.Enqueue(sound); return Task.CompletedTask; },
+            () => { events.Enqueue("mute"); return muteSucceeded; },
+            () => { events.Enqueue("restore"); return true; },
+            _ => { },
+            enabled => { events.Enqueue($"pause:{enabled}"); return Task.CompletedTask; },
+            () => { events.Enqueue("resume"); return Task.CompletedTask; }
+        );
+
+        Assert.That(await controller.StartRecordingAsync(true, false), Is.EqualTo(muteSucceeded));
+        await controller.StopRecordingAsync(muteSucceeded, false);
+
+        var expected = new List<string> { "rec-start", "mute", "pause:True" };
+        if (muteSucceeded) expected.Add("restore");
+        expected.AddRange(new[] { "rec-stop", "resume" });
+        Assert.That(events, Is.EqualTo(expected));
+    }
+
+    [Test]
+    public async Task StopDuringPendingMediaPauseWaitsThenResumes()
+    {
+        var started = NewCompletionSource();
+        var release = NewCompletionSource();
+        var resumed = false;
+        var controller = new RecordingAmbianceController(
+            _ => Task.CompletedTask, () => true, () => true, _ => { },
+            async _ => { started.TrySetResult(true); await release.Task; },
+            () => { resumed = true; return Task.CompletedTask; }
+        );
+
+        var start = controller.StartRecordingAsync(true, true);
+        await started.Task;
+        var stop = controller.StopRecordingAsync(false, true);
+        Assert.That(resumed, Is.False);
+        release.TrySetResult(true);
+        await Task.WhenAll(start, stop);
+        Assert.That(resumed, Is.True);
+    }
+
+    [Test]
+    public async Task RestoreFailureStillResumesMediaAndReleasesTheGate()
+    {
+        var resumes = 0;
+        var controller = new RecordingAmbianceController(
+            _ => Task.CompletedTask, () => true,
+            () => throw new InvalidOperationException("audio device disconnected"), _ => { },
+            _ => Task.CompletedTask,
+            () => { resumes++; return Task.CompletedTask; }
+        );
+        Func<Task> stop = () => controller.StopRecordingAsync(true, true);
+        Assert.ThrowsAsync<InvalidOperationException>(stop);
+        Assert.That(resumes, Is.EqualTo(1));
+        Assert.That(await controller.StartRecordingAsync(false, true).WaitAsync(TimeSpan.FromSeconds(1)), Is.True);
+    }
+
     private static TaskCompletionSource<bool> NewCompletionSource()
     {
         return new TaskCompletionSource<bool>(

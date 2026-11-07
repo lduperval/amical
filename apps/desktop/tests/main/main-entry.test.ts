@@ -2,11 +2,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 let appModuleLoaded = false;
 let accelerationDisabledAtAppImport = false;
+const hostPlatform = process.platform;
 
 // vi.mock factories are cached in the mock registry and survive
 // vi.resetModules(), so per-test behavior (squirrel flag, app-module failure)
 // must be registered with vi.doMock before each fresh import of the entry.
-async function importEntry(opts: { started?: boolean; appError?: Error } = {}) {
+async function importEntry(
+  opts: { started?: boolean; appError?: Error; packaged?: boolean } = {},
+) {
   vi.resetModules();
   vi.doMock("electron-squirrel-startup", () => ({
     default: opts.started ?? false,
@@ -20,6 +23,13 @@ async function importEntry(opts: { started?: boolean; appError?: Error } = {}) {
     return {};
   });
 
+  // Resolve the native test harness before emulating another OS on Windows.
+  const platform = process.platform;
+  const platformMock = vi.spyOn(process, "platform", "get");
+  platformMock.mockReturnValue(hostPlatform);
+  const { app } = await import("electron");
+  platformMock.mockReturnValue(platform);
+  Reflect.set(app, "isPackaged", opts.packaged ?? false);
   await import("@/main/main");
   await vi.dynamicImportSettled();
   // dynamicImportSettled resolves when the import settles; the entry's .catch
@@ -100,6 +110,14 @@ describe("main entry", () => {
     expect(appModuleLoaded).toBe(true);
     expect(dialog.showMessageBox).not.toHaveBeenCalled();
     expect(app.exit).not.toHaveBeenCalled();
+  });
+
+  it("names development builds separately without renaming installed builds", async () => {
+    const dev = await importEntry();
+    expect(dev.app.setName).toHaveBeenCalledWith("AmicalDev");
+    vi.clearAllMocks();
+    const installed = await importEntry({ packaged: true });
+    expect(installed.app.setName).not.toHaveBeenCalled();
   });
 
   it("shows an error dialog and exits when the app module fails to load", async () => {

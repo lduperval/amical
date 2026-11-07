@@ -96,11 +96,14 @@ namespace WindowsHelper
             accessibilityService = new AccessibilityService(clipboardService);
             editWatchService = new EditWatchService();
             var audioService = new AudioService();
+            var mediaPlayback = new MediaPlaybackService(LogToStderr);
             recordingAmbianceController = new RecordingAmbianceController(
                 audioService.PlaySound,
                 audioService.MuteSystemAudio,
                 audioService.RestoreSystemAudio,
-                LogToStderr
+                LogToStderr,
+                mediaPlayback.PauseAsync,
+                mediaPlayback.ResumeAsync
             );
 
             if (staRunner != null)
