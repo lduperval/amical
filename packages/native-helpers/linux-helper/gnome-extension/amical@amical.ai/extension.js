@@ -26,6 +26,7 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Config from 'resource:///org/gnome/shell/misc/config.js';
 
 export const API_VERSION = 1;
+const EXTENSION_VERSION = 3;
 const OBJECT_PATH = '/org/gnome/Shell/Extensions/Amical';
 const ERROR_PREFIX = 'org.gnome.Shell.Extensions.Amical.Error';
 
@@ -136,10 +137,19 @@ export default class AmicalExtension extends Extension {
             (_display, win) => this._onWindowCreated(win));
         this._focusId = global.display.connect('notify::focus-window',
             () => this._onFocusChanged());
+        this._grabBeginId = global.display.connect('grab-op-begin',
+            (_display, win, op) => this._onGrabBegin(win, op));
+        this._grabEndId = global.display.connect('grab-op-end',
+            (_display, win) => this._onGrabEnd(win));
         this._onFocusChanged();
     }
 
     disable() {
+        for (const id of [this._grabBeginId, this._grabEndId]) {
+            if (id)
+                global.display.disconnect(id);
+        }
+        this._grabBeginId = this._grabEndId = 0;
         if (this._windowCreatedId) {
             global.display.disconnect(this._windowCreatedId);
             this._windowCreatedId = 0;
@@ -172,6 +182,7 @@ export default class AmicalExtension extends Extension {
     GetStatus() {
         return JSON.stringify({
             version: API_VERSION,
+            extensionVersion: EXTENSION_VERSION,
             shellVersion: Config.PACKAGE_VERSION,
             keyboard: this._keyboard !== null,
             chords: Object.keys(CHORDS),
@@ -181,6 +192,7 @@ export default class AmicalExtension extends Extension {
                 window: w.window ? windowInfo(w.window) : null,
                 isAbove: w.window ? w.window.is_above() : null,
                 onAllWorkspaces: w.window ? w.window.is_on_all_workspaces() : null,
+                skipTaskbar: w.window ? w.window.is_skip_taskbar() : null,
             })),
         });
     }
@@ -222,9 +234,12 @@ export default class AmicalExtension extends Extension {
         if (!title)
             throw new Error('title must not be empty');
         const entry = this._widgets.get(title) ?? {
-            window: null, signals: [], settleTimer: 0,
+            window: null, signals: [], settleTimer: 0, placementTimer: 0, dragging: false,
         };
-        Object.assign(entry, {x, y, above, sticky});
+        // Ignore stale client coordinates while a compositor drag is settling.
+        if (!entry.dragging)
+            Object.assign(entry, {x, y});
+        Object.assign(entry, {above, sticky});
         this._widgets.set(title, entry);
 
         const win = entry.window ?? this._findWidgetWindow(title);
@@ -318,13 +333,18 @@ export default class AmicalExtension extends Extension {
         if (entry.window !== win) {
             entry.window = win;
             entry.signals = [
-                win.connect('position-changed', () => this._scheduleMoved(title)),
-                win.connect('size-changed', () => this._scheduleMoved(title)),
+                // Wayland configure/resize is asynchronous. Reapply placement
+                // after the new surface size commits, without saving it as a drag.
+                win.connect('size-changed', () => this._schedulePlacement(title)),
                 win.connect('focus', () => this._restoreForeignFocus()),
                 win.connect('unmanaged', () => this._releaseWidget(title, false)),
             ];
         }
         try {
+            // skipTaskbar/type hints from Electron are X11-only. Mutter 49+
+            // supplies the equivalent for native Wayland windows.
+            if (typeof win.hide_from_window_list === 'function')
+                win.hide_from_window_list();
             if (entry.sticky && !win.is_on_all_workspaces())
                 win.stick();
             if (entry.above && !win.is_above())
@@ -332,7 +352,7 @@ export default class AmicalExtension extends Extension {
             else if (!entry.above && win.is_above())
                 win.unmake_above();
             const frame = win.get_frame_rect();
-            if (frame.x !== entry.x || frame.y !== entry.y)
+            if (!entry.dragging && (frame.x !== entry.x || frame.y !== entry.y))
                 win.move_frame(false, entry.x, entry.y);
             win.raise();
             if (win.has_focus())
@@ -350,6 +370,10 @@ export default class AmicalExtension extends Extension {
             GLib.source_remove(entry.settleTimer);
             entry.settleTimer = 0;
         }
+        if (entry.placementTimer) {
+            GLib.source_remove(entry.placementTimer);
+            entry.placementTimer = 0;
+        }
         const win = entry.window;
         if (win) {
             for (const id of entry.signals) {
@@ -361,6 +385,8 @@ export default class AmicalExtension extends Extension {
             }
             if (unmakeAbove) {
                 try {
+                    if (typeof win.show_in_window_list === 'function')
+                        win.show_in_window_list();
                     if (win.is_above())
                         win.unmake_above();
                 } catch (_e) {
@@ -370,6 +396,42 @@ export default class AmicalExtension extends Extension {
         }
         entry.window = null;
         entry.signals = [];
+        entry.dragging = false;
+    }
+
+    _schedulePlacement(title) {
+        const entry = this._widgets.get(title);
+        if (!entry || entry.dragging || entry.placementTimer)
+            return;
+        entry.placementTimer = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+            entry.placementTimer = 0;
+            if (entry.window && !entry.dragging)
+                this._adoptWindow(title, entry, entry.window);
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _onGrabBegin(win, op) {
+        // Mutter adds this private flag for unconstrained pointer moves.
+        op &= ~1024;
+        if (op !== Meta.GrabOp.MOVING && op !== Meta.GrabOp.KEYBOARD_MOVING)
+            return;
+        for (const entry of this._widgets.values()) {
+            if (entry.window === win) {
+                if (entry.settleTimer) {
+                    GLib.source_remove(entry.settleTimer);
+                    entry.settleTimer = 0;
+                }
+                entry.dragging = true;
+            }
+        }
+    }
+
+    _onGrabEnd(win) {
+        for (const [title, entry] of this._widgets) {
+            if (entry.window === win && entry.dragging)
+                this._scheduleMoved(title);
+        }
     }
 
     _scheduleMoved(title) {
@@ -381,6 +443,7 @@ export default class AmicalExtension extends Extension {
         entry.settleTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, MOVE_SETTLE_MS, () => {
             entry.settleTimer = 0;
             const win = entry.window;
+            entry.dragging = false;
             if (win && this._dbus) {
                 const frame = win.get_frame_rect();
                 // Remember where the user put it so a re-created toplevel

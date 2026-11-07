@@ -59,6 +59,8 @@ const createManager = (mode: "wayland" | "x11") => {
     showInactive: vi.fn(),
     setBounds: vi.fn(),
     setSize: vi.fn(),
+    setMinimumSize: vi.fn(),
+    setMaximumSize: vi.fn(),
     setShape: vi.fn(),
     setIgnoreMouseEvents: vi.fn(),
     getBounds: vi.fn(() => ({ x: 0, y: 0, width: 640, height: 320 })),
@@ -165,6 +167,32 @@ describe("WindowManager on native Wayland", () => {
     expect(widgetWindow.setSize).toHaveBeenLastCalledWith(146, 34);
     manager.setWidgetControlSize({ width: 96, height: 30 });
     expect(widgetWindow.setSize).toHaveBeenLastCalledWith(106, 40);
+  });
+
+  it("updates native size constraints even when Electron already reports the compact size", () => {
+    const { manager, widgetWindow } = createManager("wayland");
+    widgetWindow.getBounds.mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 118,
+      height: 34,
+    });
+    manager.setLinuxWidgetPlacer({
+      place: vi.fn(async () => ({ success: true, found: true })),
+    });
+    manager.showWidget();
+    expect(widgetWindow.setSize).not.toHaveBeenCalled();
+    expect(widgetWindow.setMinimumSize.mock.calls).toEqual([
+      [1, 1],
+      [118, 34],
+    ]);
+    expect(widgetWindow.setMaximumSize).toHaveBeenCalledWith(118, 34);
+    manager.setWidgetIgnoreMouseEvents(false, true);
+    expect(widgetWindow.setMaximumSize).toHaveBeenLastCalledWith(640, 320);
+    expect(widgetWindow.setMinimumSize).toHaveBeenLastCalledWith(640, 320);
+    manager.setWidgetIgnoreMouseEvents(false, false);
+    expect(widgetWindow.setMaximumSize).toHaveBeenLastCalledWith(118, 34);
+    expect(widgetWindow.setMinimumSize).toHaveBeenLastCalledWith(118, 34);
   });
 
   it("remembers measured dimensions during expanded content and applies them on collapse", () => {

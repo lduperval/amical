@@ -815,6 +815,14 @@ export class WindowManager extends EventEmitter {
       return;
     }
     const currentBounds = this.widgetWindow.getBounds();
+    // On native Wayland, resizable:false fixes the xdg_toplevel constraints
+    // at the previous size. setSize alone can change Electron's cached bounds
+    // while Mutter retains a 640x320 surface. Update the native constraints
+    // even when the cached bounds already match (including the first show).
+    // Lower the minimum first so both growing and shrinking remain valid.
+    this.widgetWindow.setMinimumSize(1, 1);
+    this.widgetWindow.setMaximumSize(bounds.width, bounds.height);
+    this.widgetWindow.setMinimumSize(bounds.width, bounds.height);
     if (
       currentBounds.width !== bounds.width ||
       currentBounds.height !== bounds.height

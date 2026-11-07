@@ -51,6 +51,18 @@ Restart Amical afterwards. Its log (`~/.config/Amical/logs/amical.log`) prints
 `GNOME Shell integration: available` from the Linux helper when the extension
 answers.
 
+Updates also require a logout/login: GNOME caches the imported JavaScript for
+the entire session, so disabling and enabling the extension does not load new
+code. `GetStatus` reports `extensionVersion: 3` for the version that saves only
+completed user drags and hides the widget from GNOME's taskbar/window lists
+(Mutter 49+). Its `version: 1` field is the unchanged D-Bus API version.
+
+The widget's fixed Wayland size constraints must change together with its
+surface size. Otherwise Electron can report a compact pill while Mutter still
+has the old 640×320 frame. Programmatic placement and resize notifications must
+never be saved as user moves: that feeds the frame/anchor difference back into
+the next placement and makes the pill drift on each recording transition.
+
 ## Development
 
 - `node --input-type=module --check < amical@amical.ai/extension.js` checks the syntax.

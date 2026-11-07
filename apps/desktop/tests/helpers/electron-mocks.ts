@@ -146,6 +146,8 @@ class FakeBrowserWindow extends EventEmitter {
   }
 
   setResizable(resizable: boolean) {}
+  setMinimumSize(width: number, height: number) {}
+  setMaximumSize(width: number, height: number) {}
   setMovable(movable: boolean) {}
   setMinimizable(minimizable: boolean) {}
   setMaximizable(maximizable: boolean) {}

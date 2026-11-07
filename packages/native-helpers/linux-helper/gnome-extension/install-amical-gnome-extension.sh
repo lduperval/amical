@@ -8,7 +8,7 @@
 set -eu
 
 UUID="amical@amical.ai"
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ZIP="$HERE/$UUID.shell-extension.zip"
 
 if [ "$(id -u)" -eq 0 ]; then
